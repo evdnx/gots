@@ -1,12 +1,16 @@
 // Mean‑reversion / oversold‑overbought strategy built on the GoTI
 // indicator suite.
-package gots
+package strategy
 
 import (
 	"log"
 	"math"
 
 	"github.com/evdnx/goti"
+	"github.com/evdnx/gots/config"
+	"github.com/evdnx/gots/executor"
+	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/types"
 )
 
 // ---------------------------------------------------------------------
@@ -21,8 +25,8 @@ import (
 //	symbol  – ticker we trade (e.g. "BTCUSDT")
 type MeanReversion struct {
 	suite  *goti.IndicatorSuite
-	cfg    StrategyConfig
-	exec   Executor
+	cfg    config.StrategyConfig
+	exec   executor.Executor
 	symbol string
 }
 
@@ -32,7 +36,7 @@ type MeanReversion struct {
 //
 // Builds a fresh IndicatorSuite using the thresholds supplied in cfg.
 // Returns an error if the underlying suite cannot be created.
-func NewMeanReversion(symbol string, cfg StrategyConfig, exec Executor) (*MeanReversion, error) {
+func NewMeanReversion(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*MeanReversion, error) {
 	indCfg := goti.DefaultConfig()
 	indCfg.RSIOverbought = cfg.RSIOverbought
 	indCfg.RSIOversold = cfg.RSIOversold
@@ -103,14 +107,14 @@ func (mr *MeanReversion) ProcessBar(high, low, close, volume float64) {
 		if posQty < 0 {
 			mr.closePosition(close)
 		}
-		mr.openPosition(Buy, close)
+		mr.openPosition(types.Buy, close)
 
 	case shortSignal && posQty >= 0:
 		// Close any long side first, then go short
 		if posQty > 0 {
 			mr.closePosition(close)
 		}
-		mr.openPosition(Sell, close)
+		mr.openPosition(types.Sell, close)
 
 	// If we already have a position but no new signal, just run the
 	// trailing‑stop logic (if the user enabled it).
@@ -122,8 +126,8 @@ func (mr *MeanReversion) ProcessBar(high, low, close, volume float64) {
 // ---------------------------------------------------------------------
 // openPosition – creates a market order sized by risk parameters.
 // ---------------------------------------------------------------------
-func (mr *MeanReversion) openPosition(side Side, price float64) {
-	qty := CalcQty(mr.exec.Equity(),
+func (mr *MeanReversion) openPosition(side types.Side, price float64) {
+	qty := risk.CalcQty(mr.exec.Equity(),
 		mr.cfg.MaxRiskPerTrade,
 		mr.cfg.StopLossPct,
 		price)
@@ -131,7 +135,7 @@ func (mr *MeanReversion) openPosition(side Side, price float64) {
 	if qty <= 0 {
 		return
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  mr.symbol,
 		Side:    side,
 		Qty:     qty,
@@ -152,11 +156,11 @@ func (mr *MeanReversion) closePosition(price float64) {
 		return
 	}
 	// Reverse the side to flatten the position
-	side := Sell
+	side := types.Sell
 	if qty < 0 {
-		side = Buy
+		side = types.Buy
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  mr.symbol,
 		Side:    side,
 		Qty:     math.Abs(qty),

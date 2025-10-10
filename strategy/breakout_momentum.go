@@ -19,13 +19,17 @@
 //     optional trailing‑stop.
 //   - Position sizing is driven by the generic risk calculator (max % of equity
 //     per trade, stop‑loss % etc.).
-package gots
+package strategy
 
 import (
 	"log"
 	"math"
 
 	"github.com/evdnx/goti"
+	"github.com/evdnx/gots/config"
+	"github.com/evdnx/gots/executor"
+	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/types"
 )
 
 // ---------------------------------------------------------------------
@@ -41,8 +45,8 @@ import (
 //	symbol  – ticker we trade (e.g. "ETHUSDT").
 type BreakoutMomentum struct {
 	suite  *goti.IndicatorSuite
-	cfg    StrategyConfig
-	exec   Executor
+	cfg    config.StrategyConfig
+	exec   executor.Executor
 	symbol string
 }
 
@@ -54,7 +58,7 @@ type BreakoutMomentum struct {
 // Only the three indicators needed for the breakout logic are consulted,
 // but we still instantiate the full suite because the constructor lives in
 // the GoTI package and returns a ready‑to‑use object.
-func NewBreakoutMomentum(symbol string, cfg StrategyConfig, exec Executor) (*BreakoutMomentum, error) {
+func NewBreakoutMomentum(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*BreakoutMomentum, error) {
 	indCfg := goti.DefaultConfig()
 	indCfg.ATSEMAperiod = cfg.ATSEMAperiod // propagate user‑chosen EMA period
 
@@ -123,14 +127,14 @@ func (bm *BreakoutMomentum) ProcessBar(high, low, close, volume float64) {
 		if posQty < 0 {
 			bm.closePosition(close)
 		}
-		bm.openPosition(Buy, close)
+		bm.openPosition(types.Buy, close)
 
 	case shortSignal && posQty >= 0:
 		// Close any long side first, then go short.
 		if posQty > 0 {
 			bm.closePosition(close)
 		}
-		bm.openPosition(Sell, close)
+		bm.openPosition(types.Sell, close)
 
 	// No new breakout signal – keep the existing position alive but enforce
 	// trailing‑stop (if enabled) and monitor for an opposite breakout.
@@ -151,8 +155,8 @@ func (bm *BreakoutMomentum) ProcessBar(high, low, close, volume float64) {
 // ---------------------------------------------------------------------
 // openPosition – creates a market order sized by risk parameters.
 // ---------------------------------------------------------------------
-func (bm *BreakoutMomentum) openPosition(side Side, price float64) {
-	qty := CalcQty(
+func (bm *BreakoutMomentum) openPosition(side types.Side, price float64) {
+	qty := risk.CalcQty(
 		bm.exec.Equity(),
 		bm.cfg.MaxRiskPerTrade,
 		bm.cfg.StopLossPct,
@@ -161,7 +165,7 @@ func (bm *BreakoutMomentum) openPosition(side Side, price float64) {
 	if qty <= 0 {
 		return
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  bm.symbol,
 		Side:    side,
 		Qty:     qty,
@@ -182,11 +186,11 @@ func (bm *BreakoutMomentum) closePosition(price float64) {
 		return
 	}
 	// Reverse side to flatten the position.
-	side := Sell
+	side := types.Sell
 	if qty < 0 {
-		side = Buy
+		side = types.Buy
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  bm.symbol,
 		Side:    side,
 		Qty:     math.Abs(qty),

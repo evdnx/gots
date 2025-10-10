@@ -1,21 +1,25 @@
-package gots
+package strategy
 
 import (
 	"log"
 	"math"
 
 	"github.com/evdnx/goti"
+	"github.com/evdnx/gots/config"
+	"github.com/evdnx/gots/executor"
+	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/types"
 )
 
 type TrendComposite struct {
 	suite   *goti.IndicatorSuite
-	cfg     StrategyConfig
-	exec    Executor
+	cfg     config.StrategyConfig
+	exec    executor.Executor
 	symbol  string
 	lastDir int // -1 = short, 0 = flat, +1 = long
 }
 
-func NewTrendComposite(symbol string, cfg StrategyConfig, exec Executor) (*TrendComposite, error) {
+func NewTrendComposite(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*TrendComposite, error) {
 	// Build a suite with the same config we will use for thresholds
 	indCfg := goti.DefaultConfig()
 	indCfg.RSIOverbought = cfg.RSIOverbought
@@ -72,14 +76,14 @@ func (t *TrendComposite) ProcessBar(high, low, close, volume float64) {
 		if posQty < 0 {
 			t.closePosition(close)
 		}
-		t.openPosition(Buy, close)
+		t.openPosition(types.Buy, close)
 
 	case shortCond && posQty >= 0:
 		// Close long (if any) then go short
 		if posQty > 0 {
 			t.closePosition(close)
 		}
-		t.openPosition(Sell, close)
+		t.openPosition(types.Sell, close)
 
 	// Optional trailing‑stop logic (run every bar)
 	case posQty != 0:
@@ -88,12 +92,12 @@ func (t *TrendComposite) ProcessBar(high, low, close, volume float64) {
 }
 
 // openPosition creates a market order sized by risk.
-func (t *TrendComposite) openPosition(side Side, price float64) {
-	qty := CalcQty(t.exec.Equity(), t.cfg.MaxRiskPerTrade, t.cfg.StopLossPct, price)
+func (t *TrendComposite) openPosition(side types.Side, price float64) {
+	qty := risk.CalcQty(t.exec.Equity(), t.cfg.MaxRiskPerTrade, t.cfg.StopLossPct, price)
 	if qty <= 0 {
 		return
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  t.symbol,
 		Side:    side,
 		Qty:     qty,
@@ -103,7 +107,7 @@ func (t *TrendComposite) openPosition(side Side, price float64) {
 	if err := t.exec.Submit(o); err != nil {
 		log.Printf("[ERR] submit entry: %v", err)
 	}
-	t.lastDir = map[Side]int{Buy: 1, Sell: -1}[side]
+	t.lastDir = map[types.Side]int{types.Buy: 1, types.Sell: -1}[side]
 }
 
 // closePosition exits the current position at market price.
@@ -112,11 +116,11 @@ func (t *TrendComposite) closePosition(price float64) {
 	if qty == 0 {
 		return
 	}
-	side := Sell
+	side := types.Sell
 	if qty < 0 {
-		side = Buy
+		side = types.Buy
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  t.symbol,
 		Side:    side,
 		Qty:     math.Abs(qty),

@@ -2,24 +2,27 @@
 // Uses ATSO (adaptive period) to gauge volatility and ATR for an absolute
 // stop‑distance.  The entry signal itself is a simple HMA bullish/bearish
 // crossover – the novelty is the *size* of the trade.
-package gots
+package strategy
 
 import (
 	"log"
 	"math"
 
 	"github.com/evdnx/goti"
+	"github.com/evdnx/gots/config"
+	"github.com/evdnx/gots/executor"
+	"github.com/evdnx/gots/types"
 )
 
 type VolScaledPos struct {
 	suite  *goti.IndicatorSuite
-	cfg    StrategyConfig
-	exec   Executor
+	cfg    config.StrategyConfig
+	exec   executor.Executor
 	symbol string
 }
 
 // NewVolScaledPos builds the suite and stores the config.
-func NewVolScaledPos(symbol string, cfg StrategyConfig, exec Executor) (*VolScaledPos, error) {
+func NewVolScaledPos(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*VolScaledPos, error) {
 	indCfg := goti.DefaultConfig()
 	indCfg.ATSEMAperiod = cfg.ATSEMAperiod
 	suite, err := goti.NewIndicatorSuiteWithConfig(indCfg)
@@ -75,13 +78,13 @@ func (v *VolScaledPos) ProcessBar(high, low, close, volume float64) {
 		if posQty < 0 {
 			v.closePosition(close)
 		}
-		v.openPosition(Buy, qty, close)
+		v.openPosition(types.Buy, qty, close)
 
 	case hBear && posQty >= 0:
 		if posQty > 0 {
 			v.closePosition(close)
 		}
-		v.openPosition(Sell, qty, close)
+		v.openPosition(types.Sell, qty, close)
 
 	case posQty != 0:
 		// Apply trailing stop (optional)
@@ -92,11 +95,11 @@ func (v *VolScaledPos) ProcessBar(high, low, close, volume float64) {
 }
 
 // openPosition – market order sized by the pre‑computed qty.
-func (v *VolScaledPos) openPosition(side Side, qty float64, price float64) {
+func (v *VolScaledPos) openPosition(side types.Side, qty float64, price float64) {
 	if qty <= 0 {
 		return
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  v.symbol,
 		Side:    side,
 		Qty:     qty,
@@ -114,11 +117,11 @@ func (v *VolScaledPos) closePosition(price float64) {
 	if qty == 0 {
 		return
 	}
-	side := Sell
+	side := types.Sell
 	if qty < 0 {
-		side = Buy
+		side = types.Buy
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  v.symbol,
 		Side:    side,
 		Qty:     math.Abs(qty),

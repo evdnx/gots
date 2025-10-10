@@ -1,4 +1,4 @@
-package gots
+package types
 
 type Side string
 

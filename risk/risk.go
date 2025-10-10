@@ -1,4 +1,4 @@
-package gots
+package risk
 
 import "math"
 

@@ -1,4 +1,4 @@
-package gots
+package config
 
 type StrategyConfig struct {
 	// Indicator thresholds – you can tune them per‑strategy

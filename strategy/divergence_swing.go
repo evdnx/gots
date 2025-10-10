@@ -1,25 +1,29 @@
 // Looks for classic bullish/bearish divergence between price and an
 // oscillator (RSI, MFI, or ADMO).  When any oscillator signals divergence
 // **and** the HMA indicates the overall trend direction, a trade is taken.
-package gots
+package strategy
 
 import (
 	"log"
 	"math"
 
 	"github.com/evdnx/goti"
+	"github.com/evdnx/gots/config"
+	"github.com/evdnx/gots/executor"
+	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/types"
 )
 
 type DivergenceSwing struct {
 	suite  *goti.IndicatorSuite
-	cfg    StrategyConfig
-	exec   Executor
+	cfg    config.StrategyConfig
+	exec   executor.Executor
 	symbol string
 }
 
 // NewDivergenceSwing builds a suite with the default config (thresholds
 // are taken from cfg for flexibility).
-func NewDivergenceSwing(symbol string, cfg StrategyConfig, exec Executor) (*DivergenceSwing, error) {
+func NewDivergenceSwing(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*DivergenceSwing, error) {
 	indCfg := goti.DefaultConfig()
 	indCfg.RSIOverbought = cfg.RSIOverbought
 	indCfg.RSIOversold = cfg.RSIOversold
@@ -81,13 +85,13 @@ func (d *DivergenceSwing) ProcessBar(high, low, close, volume float64) {
 		if posQty < 0 {
 			d.closePosition(close)
 		}
-		d.openPosition(Buy, close)
+		d.openPosition(types.Buy, close)
 
 	case shortCond && posQty >= 0:
 		if posQty > 0 {
 			d.closePosition(close)
 		}
-		d.openPosition(Sell, close)
+		d.openPosition(types.Sell, close)
 
 	case posQty != 0:
 		d.applyTrailingStop(close)
@@ -96,12 +100,12 @@ func (d *DivergenceSwing) ProcessBar(high, low, close, volume float64) {
 
 // openPosition / closePosition / applyTrailingStop are identical to the
 // implementations used in the other strategy files (re‑used for brevity).
-func (d *DivergenceSwing) openPosition(side Side, price float64) {
-	qty := CalcQty(d.exec.Equity(), d.cfg.MaxRiskPerTrade, d.cfg.StopLossPct, price)
+func (d *DivergenceSwing) openPosition(side types.Side, price float64) {
+	qty := risk.CalcQty(d.exec.Equity(), d.cfg.MaxRiskPerTrade, d.cfg.StopLossPct, price)
 	if qty <= 0 {
 		return
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  d.symbol,
 		Side:    side,
 		Qty:     qty,
@@ -117,11 +121,11 @@ func (d *DivergenceSwing) closePosition(price float64) {
 	if qty == 0 {
 		return
 	}
-	side := Sell
+	side := types.Sell
 	if qty < 0 {
-		side = Buy
+		side = types.Buy
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  d.symbol,
 		Side:    side,
 		Qty:     math.Abs(qty),

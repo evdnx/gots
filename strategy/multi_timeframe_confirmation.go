@@ -1,27 +1,31 @@
 // Trades only when the same signal appears on two different time‑frames.
 // Here we use a *fast* (e.g., 5‑min) suite and a *slow* (e.g., 30‑min) suite.
 // The signal we look for is a bullish/bearish HMA crossover.
-package gots
+package strategy
 
 import (
 	"log"
 	"math"
 
 	"github.com/evdnx/goti"
+	"github.com/evdnx/gots/config"
+	"github.com/evdnx/gots/executor"
+	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/types"
 )
 
 type MultiTF struct {
 	fastSuite *goti.IndicatorSuite
 	slowSuite *goti.IndicatorSuite
-	cfg       StrategyConfig
-	exec      Executor
+	cfg       config.StrategyConfig
+	exec      executor.Executor
 	symbol    string
 	fastTFSec int // seconds per fast bar (e.g. 300 for 5‑min)
 	slowTFSec int // seconds per slow bar (e.g. 1800 for 30‑min)
 }
 
 // NewMultiTF builds two independent suites – one for each resolution.
-func NewMultiTF(symbol string, cfg StrategyConfig, exec Executor,
+func NewMultiTF(symbol string, cfg config.StrategyConfig, exec executor.Executor,
 	fastSec, slowSec int) (*MultiTF, error) {
 
 	indCfg := goti.DefaultConfig()
@@ -78,13 +82,13 @@ func (m *MultiTF) ProcessBar(high, low, close, volume float64) {
 		if posQty < 0 {
 			m.closePosition(close)
 		}
-		m.openPosition(Buy, close)
+		m.openPosition(types.Buy, close)
 
 	case shortCond && posQty >= 0:
 		if posQty > 0 {
 			m.closePosition(close)
 		}
-		m.openPosition(Sell, close)
+		m.openPosition(types.Sell, close)
 
 	case posQty != 0:
 		m.applyTrailingStop(close)
@@ -93,12 +97,12 @@ func (m *MultiTF) ProcessBar(high, low, close, volume float64) {
 
 // openPosition / closePosition / applyTrailingStop are identical to the
 // implementations in other strategy files (re‑used for brevity).
-func (m *MultiTF) openPosition(side Side, price float64) {
-	qty := CalcQty(m.exec.Equity(), m.cfg.MaxRiskPerTrade, m.cfg.StopLossPct, price)
+func (m *MultiTF) openPosition(side types.Side, price float64) {
+	qty := risk.CalcQty(m.exec.Equity(), m.cfg.MaxRiskPerTrade, m.cfg.StopLossPct, price)
 	if qty <= 0 {
 		return
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  m.symbol,
 		Side:    side,
 		Qty:     qty,
@@ -114,11 +118,11 @@ func (m *MultiTF) closePosition(price float64) {
 	if qty == 0 {
 		return
 	}
-	side := Sell
+	side := types.Sell
 	if qty < 0 {
-		side = Buy
+		side = types.Buy
 	}
-	o := Order{
+	o := types.Order{
 		Symbol:  m.symbol,
 		Side:    side,
 		Qty:     math.Abs(qty),

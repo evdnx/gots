@@ -1,9 +1,13 @@
-package gots
+package executor
 
-import "log"
+import (
+	"log"
+
+	"github.com/evdnx/gots/types"
+)
 
 type Executor interface {
-	Submit(o Order) error
+	Submit(o types.Order) error
 	// For back‑testing we expose the portfolio state
 	Equity() float64
 	Position(symbol string) (qty float64, avgPrice float64)
@@ -24,13 +28,13 @@ func NewPaperExecutor(startEquity float64) *PaperExecutor {
 	}
 }
 
-func (p *PaperExecutor) Submit(o Order) error {
+func (p *PaperExecutor) Submit(o types.Order) error {
 	if o.Qty == 0 {
 		return nil
 	}
 	// market fill – price = current market price (passed in Order.Price)
 	cost := o.Price * o.Qty
-	if o.Side == Buy {
+	if o.Side == types.Buy {
 		if cost > p.equity {
 			return log.Output(2, "paper executor: insufficient cash")
 		}
