@@ -1,156 +1,127 @@
-// Trades only when the same signal appears on two different time‑frames.
-// Here we use a *fast* (e.g., 5‑min) suite and a *slow* (e.g., 30‑min) suite.
-// The signal we look for is a bullish/bearish HMA crossover.
 package strategy
 
 import (
-	"log"
-	"math"
-
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
-	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
+	"go.uber.org/zap"
 )
 
+// MultiTF confirms a signal on two time‑frames (fast & slow).
 type MultiTF struct {
+	*BaseStrategy
 	fastSuite *goti.IndicatorSuite
 	slowSuite *goti.IndicatorSuite
-	cfg       config.StrategyConfig
-	exec      executor.Executor
-	symbol    string
-	fastTFSec int // seconds per fast bar (e.g. 300 for 5‑min)
-	slowTFSec int // seconds per slow bar (e.g. 1800 for 30‑min)
+	fastTFSec int
+	slowTFSec int
 }
 
 // NewMultiTF builds two independent suites – one for each resolution.
-func NewMultiTF(symbol string, cfg config.StrategyConfig, exec executor.Executor,
+func NewMultiTF(symbol string, cfg config.StrategyConfig,
+	exec executor.Executor, log logger.Logger,
 	fastSec, slowSec int) (*MultiTF, error) {
 
-	indCfg := goti.DefaultConfig()
-	indCfg.ATSEMAperiod = cfg.ATSEMAperiod
-
-	fast, err := goti.NewIndicatorSuiteWithConfig(indCfg)
+	suiteFactory := func() (*goti.IndicatorSuite, error) {
+		ic := goti.DefaultConfig()
+		ic.ATSEMAperiod = cfg.ATSEMAperiod
+		return goti.NewIndicatorSuiteWithConfig(ic)
+	}
+	fast, err := suiteFactory()
 	if err != nil {
 		return nil, err
 	}
-	slow, err := goti.NewIndicatorSuiteWithConfig(indCfg)
+	slow, err := suiteFactory()
+	if err != nil {
+		return nil, err
+	}
+	base, err := NewBaseStrategy(symbol, cfg, exec, suiteFactory, log)
 	if err != nil {
 		return nil, err
 	}
 	return &MultiTF{
-		fastSuite: fast,
-		slowSuite: slow,
-		cfg:       cfg,
-		exec:      exec,
-		symbol:    symbol,
-		fastTFSec: fastSec,
-		slowTFSec: slowSec,
+		BaseStrategy: base,
+		fastSuite:    fast,
+		slowSuite:    slow,
+		fastTFSec:    fastSec,
+		slowTFSec:    slowSec,
 	}, nil
 }
 
-// ProcessBar receives *fast* bars.  When a new *slow* bar is due we also
-// feed the same candle to the slow suite (the caller must aggregate candles
-// externally – here we simply forward every bar to both suites; the slow
-// suite will ignore extra data because its internal window is larger).
+// ProcessBar receives fast bars; the slow suite receives the same data
+// (it internally trims to its longer window).
 func (m *MultiTF) ProcessBar(high, low, close, volume float64) {
 	// Fast suite always receives the bar.
 	if err := m.fastSuite.Add(high, low, close, volume); err != nil {
-		log.Printf("[WARN] fast suite add: %v", err)
+		m.Log.Warn("fast_suite_add_error", zap.Error(err))
 	}
-	// Slow suite receives the same bar (it will keep only the most recent
-	// `slowTFSec` worth of data because of its internal trimming).
+	// Slow suite receives the same bar (it will ignore excess data internally).
 	if err := m.slowSuite.Add(high, low, close, volume); err != nil {
-		log.Printf("[WARN] slow suite add: %v", err)
+		m.Log.Warn("slow_suite_add_error", zap.Error(err))
 	}
 
-	// ----- Check for aligned signals -----
+	// Ensure both suites have enough history.
+	if len(m.fastSuite.GetHMA().GetCloses()) < 10 || len(m.slowSuite.GetHMA().GetCloses()) < 10 {
+		return // warm‑up
+	}
+
+	// Check for aligned HMA crossovers.
 	fBull, _ := m.fastSuite.GetHMA().IsBullishCrossover()
 	fBear, _ := m.fastSuite.GetHMA().IsBearishCrossover()
-
 	sBull, _ := m.slowSuite.GetHMA().IsBullishCrossover()
 	sBear, _ := m.slowSuite.GetHMA().IsBearishCrossover()
 
 	longCond := fBull && sBull
 	shortCond := fBear && sBear
 
-	posQty, _ := m.exec.Position(m.symbol)
+	posQty, _ := m.Exec.Position(m.Symbol)
 
 	switch {
 	case longCond && posQty <= 0:
 		if posQty < 0 {
-			m.closePosition(close)
+			m.closePosition(close, "mtf_close_short")
 		}
-		m.openPosition(types.Buy, close)
+		m.openLong(close)
 
 	case shortCond && posQty >= 0:
 		if posQty > 0 {
-			m.closePosition(close)
+			m.closePosition(close, "mtf_close_long")
 		}
-		m.openPosition(types.Sell, close)
+		m.openShort(close)
 
-	case posQty != 0:
+	case posQty != 0 && m.Cfg.TrailingPct > 0:
 		m.applyTrailingStop(close)
 	}
 }
 
-// openPosition / closePosition / applyTrailingStop are identical to the
-// implementations in other strategy files (re‑used for brevity).
-func (m *MultiTF) openPosition(side types.Side, price float64) {
-	qty := risk.CalcQty(m.exec.Equity(), m.cfg.MaxRiskPerTrade, m.cfg.StopLossPct, price)
+// openLong / openShort reuse the base helpers.
+func (m *MultiTF) openLong(price float64) {
+	qty := m.calcQty(price)
 	if qty <= 0 {
 		return
 	}
 	o := types.Order{
-		Symbol:  m.symbol,
-		Side:    side,
+		Symbol:  m.Symbol,
+		Side:    types.Buy,
 		Qty:     qty,
 		Price:   price,
-		Comment: "MultiTF entry",
+		Comment: "MultiTF entry long",
 	}
-	if err := m.exec.Submit(o); err != nil {
-		log.Printf("[ERR] multift submit entry: %v", err)
-	}
+	_ = m.submitOrder(o, "mtf_long")
 }
-func (m *MultiTF) closePosition(price float64) {
-	qty, _ := m.exec.Position(m.symbol)
-	if qty == 0 {
+
+func (m *MultiTF) openShort(price float64) {
+	qty := m.calcQty(price)
+	if qty <= 0 {
 		return
-	}
-	side := types.Sell
-	if qty < 0 {
-		side = types.Buy
 	}
 	o := types.Order{
-		Symbol:  m.symbol,
-		Side:    side,
-		Qty:     math.Abs(qty),
+		Symbol:  m.Symbol,
+		Side:    types.Sell,
+		Qty:     qty,
 		Price:   price,
-		Comment: "MultiTF exit",
+		Comment: "MultiTF entry short",
 	}
-	if err := m.exec.Submit(o); err != nil {
-		log.Printf("[ERR] multift submit exit: %v", err)
-	}
-}
-func (m *MultiTF) applyTrailingStop(currentPrice float64) {
-	if m.cfg.TrailingPct <= 0 {
-		return
-	}
-	qty, avg := m.exec.Position(m.symbol)
-	if qty == 0 {
-		return
-	}
-	var trailLevel float64
-	if qty > 0 {
-		trailLevel = avg * (1 + m.cfg.TrailingPct)
-		if currentPrice >= trailLevel {
-			m.closePosition(currentPrice)
-		}
-	} else {
-		trailLevel = avg * (1 - m.cfg.TrailingPct)
-		if currentPrice <= trailLevel {
-			m.closePosition(currentPrice)
-		}
-	}
+	_ = m.submitOrder(o, "mtf_short")
 }

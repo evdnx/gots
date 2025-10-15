@@ -1,200 +1,108 @@
-// Mean‑reversion / oversold‑overbought strategy built on the GoTI
-// indicator suite.
 package strategy
 
 import (
-	"log"
-	"math"
-
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
-	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
+	"go.uber.org/zap"
 )
 
-// ---------------------------------------------------------------------
-// MeanReversion – public type
-// ---------------------------------------------------------------------
-//
-// Fields:
-//
-//	suite   – a fully‑configured IndicatorSuite (RSI, MFI, VWAO, …)
-//	cfg     – risk & indicator thresholds (see StrategyConfig)
-//	exec    – order routing / paper‑trading implementation
-//	symbol  – ticker we trade (e.g. "BTCUSDT")
+// MeanReversion implements the classic oversold/overbought mean‑reversion strategy.
 type MeanReversion struct {
-	suite  *goti.IndicatorSuite
-	cfg    config.StrategyConfig
-	exec   executor.Executor
-	symbol string
+	*BaseStrategy
 }
 
-// ---------------------------------------------------------------------
-// NewMeanReversion – constructor
-// ---------------------------------------------------------------------
-//
-// Builds a fresh IndicatorSuite using the thresholds supplied in cfg.
-// Returns an error if the underlying suite cannot be created.
-func NewMeanReversion(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*MeanReversion, error) {
-	indCfg := goti.DefaultConfig()
-	indCfg.RSIOverbought = cfg.RSIOverbought
-	indCfg.RSIOversold = cfg.RSIOversold
-	indCfg.MFIOverbought = cfg.MFIOverbought
-	indCfg.MFIOversold = cfg.MFIOversold
-	indCfg.VWAOStrongTrend = cfg.VWAOStrongTrend
+// NewMeanReversion builds the suite and injects a logger.
+func NewMeanReversion(symbol string, cfg config.StrategyConfig,
+	exec executor.Executor, log logger.Logger) (*MeanReversion, error) {
 
-	suite, err := goti.NewIndicatorSuiteWithConfig(indCfg)
+	suiteFactory := func() (*goti.IndicatorSuite, error) {
+		ic := goti.DefaultConfig()
+		ic.RSIOverbought = cfg.RSIOverbought
+		ic.RSIOversold = cfg.RSIOversold
+		ic.MFIOverbought = cfg.MFIOverbought
+		ic.MFIOversold = cfg.MFIOversold
+		ic.VWAOStrongTrend = cfg.VWAOStrongTrend
+		return goti.NewIndicatorSuiteWithConfig(ic)
+	}
+	base, err := NewBaseStrategy(symbol, cfg, exec, suiteFactory, log)
 	if err != nil {
 		return nil, err
 	}
-	return &MeanReversion{
-		suite:  suite,
-		cfg:    cfg,
-		exec:   exec,
-		symbol: symbol,
-	}, nil
+	return &MeanReversion{BaseStrategy: base}, nil
 }
 
-// ---------------------------------------------------------------------
-// ProcessBar – entry point for each new OHLCV candle
-// ---------------------------------------------------------------------
-//
-// 1️⃣ Feed the suite with the fresh data.
-// 2️⃣ Pull the three oscillator signals (RSI, MFI, VWAO).
-// 3️⃣ If **all three** generate a bullish (or bearish) crossover on the
-//
-//	same bar, open a position sized by the risk calculator.
-//
-// 4️⃣ If a position already exists, apply a trailing‑stop (if enabled)
-//
-//	and/or close it when the opposite signal appears.
+// ProcessBar updates the suite and evaluates the three oscillator crossovers.
 func (mr *MeanReversion) ProcessBar(high, low, close, volume float64) {
-	// -----------------------------------------------------------------
-	// 1️⃣  Update the shared IndicatorSuite
-	// -----------------------------------------------------------------
-	if err := mr.suite.Add(high, low, close, volume); err != nil {
-		log.Printf("[WARN] mean‑reversion suite.Add error: %v", err)
+	if err := mr.Suite.Add(high, low, close, volume); err != nil {
+		mr.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
+	if len(mr.Suite.GetRSI().GetCloses()) < 14 {
+		return // warm‑up
+	}
 
-	// -----------------------------------------------------------------
-	// 2️⃣  Gather the three crossover flags
-	// -----------------------------------------------------------------
-	rsiBull, _ := mr.suite.GetRSI().IsBullishCrossover()
-	rsiBear, _ := mr.suite.GetRSI().IsBearishCrossover()
+	// Pull crossovers.
+	rsiBull, _ := mr.Suite.GetRSI().IsBullishCrossover()
+	rsiBear, _ := mr.Suite.GetRSI().IsBearishCrossover()
+	mfiBull, _ := mr.Suite.GetMFI().IsBullishCrossover()
+	mfiBear, _ := mr.Suite.GetMFI().IsBearishCrossover()
+	vwaoBull, _ := mr.Suite.GetVWAO().IsBullishCrossover()
+	vwaoBear, _ := mr.Suite.GetVWAO().IsBearishCrossover()
 
-	mfiBull, _ := mr.suite.GetMFI().IsBullishCrossover()
-	mfiBear, _ := mr.suite.GetMFI().IsBearishCrossover()
-
-	vwaoBull, _ := mr.suite.GetVWAO().IsBullishCrossover()
-	vwaoBear, _ := mr.suite.GetVWAO().IsBearishCrossover()
-
-	// -----------------------------------------------------------------
-	// 3️⃣  Determine the composite signal
-	// -----------------------------------------------------------------
 	longSignal := rsiBull && mfiBull && vwaoBull
 	shortSignal := rsiBear && mfiBear && vwaoBear
 
-	// -----------------------------------------------------------------
-	// 4️⃣  Position management
-	// -----------------------------------------------------------------
-	posQty, _ := mr.exec.Position(mr.symbol)
+	posQty, _ := mr.Exec.Position(mr.Symbol)
 
 	switch {
 	case longSignal && posQty <= 0:
-		// Close any short side first, then go long
 		if posQty < 0 {
-			mr.closePosition(close)
+			mr.closePosition(close, "mr_close_short")
 		}
-		mr.openPosition(types.Buy, close)
+		mr.openLong(close)
 
 	case shortSignal && posQty >= 0:
-		// Close any long side first, then go short
 		if posQty > 0 {
-			mr.closePosition(close)
+			mr.closePosition(close, "mr_close_long")
 		}
-		mr.openPosition(types.Sell, close)
+		mr.openShort(close)
 
-	// If we already have a position but no new signal, just run the
-	// trailing‑stop logic (if the user enabled it).
-	case posQty != 0:
+	case posQty != 0 && mr.Cfg.TrailingPct > 0:
 		mr.applyTrailingStop(close)
 	}
 }
 
-// ---------------------------------------------------------------------
-// openPosition – creates a market order sized by risk parameters.
-// ---------------------------------------------------------------------
-func (mr *MeanReversion) openPosition(side types.Side, price float64) {
-	qty := risk.CalcQty(mr.exec.Equity(),
-		mr.cfg.MaxRiskPerTrade,
-		mr.cfg.StopLossPct,
-		price)
-
+// openLong creates a long order sized by risk.
+func (mr *MeanReversion) openLong(price float64) {
+	qty := mr.calcQty(price)
 	if qty <= 0 {
 		return
 	}
 	o := types.Order{
-		Symbol:  mr.symbol,
-		Side:    side,
+		Symbol:  mr.Symbol,
+		Side:    types.Buy,
 		Qty:     qty,
-		Price:   price, // market price – set to 0 if you want a true market order
-		Comment: "MeanReversion entry",
+		Price:   price,
+		Comment: "MeanReversion entry long",
 	}
-	if err := mr.exec.Submit(o); err != nil {
-		log.Printf("[ERR] mean‑reversion submit entry: %v", err)
-	}
+	_ = mr.submitOrder(o, "mr_long")
 }
 
-// ---------------------------------------------------------------------
-// closePosition – exits the current position at market price.
-// ---------------------------------------------------------------------
-func (mr *MeanReversion) closePosition(price float64) {
-	qty, _ := mr.exec.Position(mr.symbol)
-	if qty == 0 {
+// openShort creates a short order sized by risk.
+func (mr *MeanReversion) openShort(price float64) {
+	qty := mr.calcQty(price)
+	if qty <= 0 {
 		return
-	}
-	// Reverse the side to flatten the position
-	side := types.Sell
-	if qty < 0 {
-		side = types.Buy
 	}
 	o := types.Order{
-		Symbol:  mr.symbol,
-		Side:    side,
-		Qty:     math.Abs(qty),
+		Symbol:  mr.Symbol,
+		Side:    types.Sell,
+		Qty:     qty,
 		Price:   price,
-		Comment: "MeanReversion exit",
+		Comment: "MeanReversion entry short",
 	}
-	if err := mr.exec.Submit(o); err != nil {
-		log.Printf("[ERR] mean‑reversion submit exit: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------
-// applyTrailingStop – moves the stop‑loss toward market price.
-// ---------------------------------------------------------------------
-func (mr *MeanReversion) applyTrailingStop(currentPrice float64) {
-	if mr.cfg.TrailingPct <= 0 {
-		return
-	}
-	qty, avg := mr.exec.Position(mr.symbol)
-	if qty == 0 {
-		return
-	}
-	var trailLevel float64
-	if qty > 0 { // long
-		// For longs we tighten the stop upward as price rises.
-		trailLevel = avg * (1 + mr.cfg.TrailingPct)
-		if currentPrice >= trailLevel {
-			mr.closePosition(currentPrice)
-		}
-	} else { // short
-		// For shorts we tighten the stop downward as price falls.
-		trailLevel = avg * (1 - mr.cfg.TrailingPct)
-		if currentPrice <= trailLevel {
-			mr.closePosition(currentPrice)
-		}
-	}
+	_ = mr.submitOrder(o, "mr_short")
 }

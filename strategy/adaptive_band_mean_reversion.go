@@ -1,208 +1,153 @@
-// Mean‑reversion strategy that uses an **ATR‑based adaptive band** together
-// with RSI/MFI to decide entry points.  The band width expands when
-// volatility (ATR) rises, shrinking when the market calms, which makes the
-// stop‑loss distance naturally adapt to current market conditions.
-//
-// Entry logic (per candle):
-//   - Price touches the **lower band** AND RSI is oversold → go long.
-//   - Price touches the **upper band** AND RSI is overbought → go short.
-//   - MFI is used as a secondary confirmation (must be on the same side of
-//     its own overbought/oversold thresholds).
-//   - A simple HMA trend filter is applied so we only take mean‑reversion
-//     trades when the overall trend is flat or mildly opposite.
-//
-// Exit logic:
-//   - Fixed take‑profit (configurable) or stop‑loss (ATR‑based).
-//   - Optional trailing‑stop (percentage of entry price).
 package strategy
 
 import (
-	"log"
-	"math"
-
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
-	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
+	"go.uber.org/zap"
 )
 
+// AdaptiveBandMR implements the ATR‑adaptive band mean‑reversion strategy.
 type AdaptiveBandMR struct {
-	suite  *goti.IndicatorSuite
-	cfg    config.StrategyConfig
-	exec   executor.Executor
-	symbol string
+	*BaseStrategy
 }
 
-// NewAdaptiveBandMR constructs a suite with the default config, but we
-// propagate the user‑provided thresholds (RSI/MFI overbought‑oversold).
-func NewAdaptiveBandMR(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*AdaptiveBandMR, error) {
-	indCfg := goti.DefaultConfig()
-	indCfg.RSIOverbought = cfg.RSIOverbought
-	indCfg.RSIOversold = cfg.RSIOversold
-	indCfg.MFIOverbought = cfg.MFIOverbought
-	indCfg.MFIOversold = cfg.MFIOversold
-	suite, err := goti.NewIndicatorSuiteWithConfig(indCfg)
+// NewAdaptiveBandMR constructs the strategy, validates config and injects a logger.
+func NewAdaptiveBandMR(symbol string, cfg config.StrategyConfig,
+	exec executor.Executor, log logger.Logger) (*AdaptiveBandMR, error) {
+
+	// Build suite with user‑provided thresholds.
+	suiteFactory := func() (*goti.IndicatorSuite, error) {
+		ic := goti.DefaultConfig()
+		ic.RSIOverbought = cfg.RSIOverbought
+		ic.RSIOversold = cfg.RSIOversold
+		ic.MFIOverbought = cfg.MFIOverbought
+		ic.MFIOversold = cfg.MFIOversold
+		return goti.NewIndicatorSuiteWithConfig(ic)
+	}
+
+	base, err := NewBaseStrategy(symbol, cfg, exec, suiteFactory, log)
 	if err != nil {
 		return nil, err
 	}
-	return &AdaptiveBandMR{
-		suite:  suite,
-		cfg:    cfg,
-		exec:   exec,
-		symbol: symbol,
-	}, nil
+	return &AdaptiveBandMR{BaseStrategy: base}, nil
 }
 
 // ProcessBar updates the suite and decides whether to open/close a trade.
 func (a *AdaptiveBandMR) ProcessBar(high, low, close, volume float64) {
-	if err := a.suite.Add(high, low, close, volume); err != nil {
-		log.Printf("[WARN] adaptive‑band MR add error: %v", err)
+	// Warm‑up: ensure we have enough data for the indicators.
+	if err := a.Suite.Add(high, low, close, volume); err != nil {
+		a.Log.Warn("suite_add_error", zap.Error(err))
+		return
+	}
+	if len(a.Suite.GetRSI().GetCloses()) < 14 { // example warm‑up length
 		return
 	}
 
-	// -----------------------------------------------------------------
-	// 1️⃣  Pull the latest indicator values we need.
-	// -----------------------------------------------------------------
-	atrVals := a.suite.GetATSO().GetATSOValues() // we use ATSO as a proxy for volatility
+	// 1️⃣ Pull latest indicator values.
+	atrVals := a.Suite.GetATSO().GetATSOValues()
 	if len(atrVals) == 0 {
-		// Not enough data yet.
 		return
 	}
 	atr := atrVals[len(atrVals)-1]
 
-	rsiVal, _ := a.suite.GetRSI().Calculate()
-	mfiVal, _ := a.suite.GetMFI().Calculate()
-	hmaBull, _ := a.suite.GetHMA().IsBullishCrossover()
-	hmaBear, _ := a.suite.GetHMA().IsBearishCrossover()
+	rsiVal, _ := a.Suite.GetRSI().Calculate()
+	mfiVal, _ := a.Suite.GetMFI().Calculate()
+	hmaBull, _ := a.Suite.GetHMA().IsBullishCrossover()
+	hmaBear, _ := a.Suite.GetHMA().IsBearishCrossover()
 
-	// -----------------------------------------------------------------
-	// 2️⃣  Build the adaptive band.
-	// -----------------------------------------------------------------
-	// Band multiplier is configurable via the strategy config – we reuse
-	// StopLossPct as a convenient “band width” factor (e.g. 1.5 %).
-	bandWidth := close * a.cfg.StopLossPct
+	// 2️⃣ Build adaptive band.
+	bandWidth := close * a.Cfg.StopLossPct // reuse StopLossPct as band factor
 	upperBand := close + bandWidth + atr
 	lowerBand := close - bandWidth - atr
 
-	// -----------------------------------------------------------------
-	// 3️⃣  Determine entry conditions.
-	// -----------------------------------------------------------------
-	longCond := low <= lowerBand && rsiVal <= a.cfg.RSIOversold && mfiVal <= a.cfg.MFIOversold && !hmaBull
-	shortCond := high >= upperBand && rsiVal >= a.cfg.RSIOverbought && mfiVal >= a.cfg.MFIOverbought && !hmaBear
+	// 3️⃣ Entry conditions.
+	longCond := low <= lowerBand && rsiVal <= a.Cfg.RSIOversold && mfiVal <= a.Cfg.MFIOversold && !hmaBull
+	shortCond := high >= upperBand && rsiVal >= a.Cfg.RSIOverbought && mfiVal >= a.Cfg.MFIOverbought && !hmaBear
 
-	posQty, _ := a.exec.Position(a.symbol)
+	posQty, _ := a.Exec.Position(a.Symbol)
 
 	switch {
 	case longCond && posQty <= 0:
 		if posQty < 0 {
-			a.closePosition(close)
+			a.closePosition(close, "adaptiveband_rev_close_short")
 		}
-		a.openPosition(types.Buy, close, atr)
+		a.openLong(close, atr)
 
 	case shortCond && posQty >= 0:
 		if posQty > 0 {
-			a.closePosition(close)
+			a.closePosition(close, "adaptiveband_rev_close_long")
 		}
-		a.openPosition(types.Sell, close, atr)
+		a.openShort(close, atr)
 
 	case posQty != 0:
-		// Manage existing position – trailing stop & optional profit target.
-		a.manageOpenPosition(close, atr)
+		// Manage existing position – trailing stop & optional TP.
+		if a.Cfg.TrailingPct > 0 {
+			a.applyTrailingStop(close)
+		}
+		if a.Cfg.TakeProfitPct > 0 {
+			a.manageTakeProfit(close, atr)
+		}
 	}
 }
 
-// openPosition creates a market order sized by risk.  The stop‑loss distance
-// is derived from the current ATR (so it expands/contracts with volatility).
-func (a *AdaptiveBandMR) openPosition(side types.Side, price, atr float64) {
-	// Risk per trade is a % of equity; the stop distance is ATR * StopLossPct.
-	stopDist := atr * a.cfg.StopLossPct
+// openLong creates a long order sized by risk.
+func (a *AdaptiveBandMR) openLong(price, atr float64) {
+	stopDist := atr * a.Cfg.StopLossPct
 	if stopDist <= 0 {
 		stopDist = 0.0001
 	}
-	qty := risk.CalcQty(a.exec.Equity(), a.cfg.MaxRiskPerTrade, stopDist/price, price)
+	qty := a.calcQty(price) // uses risk.CalcQty internally
 	if qty <= 0 {
 		return
 	}
 	o := types.Order{
-		Symbol:  a.symbol,
-		Side:    side,
+		Symbol:  a.Symbol,
+		Side:    types.Buy,
 		Qty:     qty,
 		Price:   price,
-		Comment: "AdaptiveBandMR entry",
+		Comment: "AdaptiveBandMR entry long",
 	}
-	if err := a.exec.Submit(o); err != nil {
-		log.Printf("[ERR] adaptive‑band submit entry: %v", err)
-	}
+	_ = a.submitOrder(o, "adaptiveband_rev_long")
 }
 
-// closePosition flattens the current position at market price.
-func (a *AdaptiveBandMR) closePosition(price float64) {
-	qty, _ := a.exec.Position(a.symbol)
-	if qty == 0 {
-		return
+// openShort creates a short order sized by risk.
+func (a *AdaptiveBandMR) openShort(price, atr float64) {
+	stopDist := atr * a.Cfg.StopLossPct
+	if stopDist <= 0 {
+		stopDist = 0.0001
 	}
-	side := types.Sell
-	if qty < 0 {
-		side = types.Buy
+	qty := a.calcQty(price)
+	if qty <= 0 {
+		return
 	}
 	o := types.Order{
-		Symbol:  a.symbol,
-		Side:    side,
-		Qty:     math.Abs(qty),
+		Symbol:  a.Symbol,
+		Side:    types.Sell,
+		Qty:     qty,
 		Price:   price,
-		Comment: "AdaptiveBandMR exit",
+		Comment: "AdaptiveBandMR entry short",
 	}
-	if err := a.exec.Submit(o); err != nil {
-		log.Printf("[ERR] adaptive‑band submit exit: %v", err)
-	}
+	_ = a.submitOrder(o, "adaptiveband_rev_short")
 }
 
-// manageOpenPosition applies trailing‑stop and optional fixed take‑profit.
-func (a *AdaptiveBandMR) manageOpenPosition(currentPrice, atr float64) {
-	if a.cfg.TrailingPct > 0 {
-		a.applyTrailingStop(currentPrice)
-	}
-	// Optional static take‑profit based on a multiple of ATR.
-	if a.cfg.TakeProfitPct > 0 {
-		qty, avg := a.exec.Position(a.symbol)
-		if qty == 0 {
-			return
-		}
-		target := avg
-		if qty > 0 { // long
-			target = avg + atr*a.cfg.TakeProfitPct
-			if currentPrice >= target {
-				a.closePosition(currentPrice)
-			}
-		} else { // short
-			target = avg - atr*a.cfg.TakeProfitPct
-			if currentPrice <= target {
-				a.closePosition(currentPrice)
-			}
-		}
-	}
-}
-
-// applyTrailingStop moves the stop‑loss toward market price.
-func (a *AdaptiveBandMR) applyTrailingStop(currentPrice float64) {
-	if a.cfg.TrailingPct <= 0 {
-		return
-	}
-	qty, avg := a.exec.Position(a.symbol)
+// manageTakeProfit implements the optional ATR‑multiple TP.
+func (a *AdaptiveBandMR) manageTakeProfit(currentPrice, atr float64) {
+	qty, avg := a.Exec.Position(a.Symbol)
 	if qty == 0 {
 		return
 	}
-	var trailLevel float64
 	if qty > 0 { // long
-		trailLevel = avg * (1 + a.cfg.TrailingPct)
-		if currentPrice >= trailLevel {
-			a.closePosition(currentPrice)
+		target := avg + atr*a.Cfg.TakeProfitPct
+		if currentPrice >= target {
+			a.closePosition(currentPrice, "adaptiveband_rev_tp")
 		}
 	} else { // short
-		trailLevel = avg * (1 - a.cfg.TrailingPct)
-		if currentPrice <= trailLevel {
-			a.closePosition(currentPrice)
+		target := avg - atr*a.Cfg.TakeProfitPct
+		if currentPrice <= target {
+			a.closePosition(currentPrice, "adaptiveband_rev_tp")
 		}
 	}
 }

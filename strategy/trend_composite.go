@@ -1,118 +1,130 @@
 package strategy
 
 import (
-	"log"
 	"math"
 
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
-	"github.com/evdnx/gots/risk"
+	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
+	"go.uber.org/zap"
 )
 
+// TrendComposite combines HMA, ADMO, and ATSO crossovers with raw‑value filters.
 type TrendComposite struct {
-	suite   *goti.IndicatorSuite
-	cfg     config.StrategyConfig
-	exec    executor.Executor
-	symbol  string
+	*BaseStrategy
 	lastDir int // -1 = short, 0 = flat, +1 = long
 }
 
-func NewTrendComposite(symbol string, cfg config.StrategyConfig, exec executor.Executor) (*TrendComposite, error) {
-	// Build a suite with the same config we will use for thresholds
-	indCfg := goti.DefaultConfig()
-	indCfg.RSIOverbought = cfg.RSIOverbought
-	indCfg.RSIOversold = cfg.RSIOversold
-	indCfg.MFIOverbought = cfg.MFIOverbought
-	indCfg.MFIOversold = cfg.MFIOversold
-	indCfg.VWAOStrongTrend = cfg.VWAOStrongTrend
-	indCfg.ATSEMAperiod = cfg.ATSEMAperiod
+// NewTrendComposite builds the suite and injects a logger.
+func NewTrendComposite(symbol string, cfg config.StrategyConfig,
+	exec executor.Executor, log logger.Logger) (*TrendComposite, error) {
 
-	suite, err := goti.NewIndicatorSuiteWithConfig(indCfg)
+	suiteFactory := func() (*goti.IndicatorSuite, error) {
+		ic := goti.DefaultConfig()
+		ic.RSIOverbought = cfg.RSIOverbought
+		ic.RSIOversold = cfg.RSIOversold
+		ic.MFIOverbought = cfg.MFIOverbought
+		ic.MFIOversold = cfg.MFIOversold
+		ic.VWAOStrongTrend = cfg.VWAOStrongTrend
+		ic.ATSEMAperiod = cfg.ATSEMAperiod
+		return goti.NewIndicatorSuiteWithConfig(ic)
+	}
+	base, err := NewBaseStrategy(symbol, cfg, exec, suiteFactory, log)
 	if err != nil {
 		return nil, err
 	}
 	return &TrendComposite{
-		suite:   suite,
-		cfg:     cfg,
-		exec:    exec,
-		symbol:  symbol,
-		lastDir: 0,
+		BaseStrategy: base,
+		lastDir:      0,
 	}, nil
 }
 
-// ProcessBar is called for every new OHLCV candle.
+// ProcessBar evaluates the composite signal and manages the position.
 func (t *TrendComposite) ProcessBar(high, low, close, volume float64) {
-	// 1️⃣ Feed the suite
-	if err := t.suite.Add(high, low, close, volume); err != nil {
-		log.Printf("[WARN] suite add error: %v", err)
+	if err := t.Suite.Add(high, low, close, volume); err != nil {
+		t.Log.Warn("suite_add_error", zap.Error(err))
+		return
+	}
+	// Warm‑up: ensure we have enough data for the indicators.
+	if len(t.Suite.GetHMA().GetCloses()) < 10 {
 		return
 	}
 
-	// 2️⃣ Pull the three signals
-	hBull, _ := t.suite.GetHMA().IsBullishCrossover()
-	hBear, _ := t.suite.GetHMA().IsBearishCrossover()
+	// Pull the three core signals.
+	hBull, _ := t.Suite.GetHMA().IsBullishCrossover()
+	hBear, _ := t.Suite.GetHMA().IsBearishCrossover()
+	aBull, _ := t.Suite.GetAMDO().IsBullishCrossover()
+	aBear, _ := t.Suite.GetAMDO().IsBearishCrossover()
+	atBull := t.Suite.GetATSO().IsBullishCrossover()
+	atBear := t.Suite.GetATSO().IsBearishCrossover()
 
-	aBull, _ := t.suite.GetAMDO().IsBullishCrossover()
-	aBear, _ := t.suite.GetAMDO().IsBearishCrossover()
-
-	atBull := t.suite.GetATSO().IsBullishCrossover()
-	atBear := t.suite.GetATSO().IsBearishCrossover()
-
-	// 3️⃣ Filter by raw values (ensure momentum is positive)
-	admoVal, _ := t.suite.GetAMDO().Calculate()
-	atsoVal, _ := t.suite.GetATSO().Calculate()
+	// Raw indicator values for momentum direction.
+	admoVal, _ := t.Suite.GetAMDO().Calculate()
+	atsoVal, _ := t.Suite.GetATSO().Calculate()
 
 	longCond := hBull && aBull && atBull && admoVal > 0 && atsoVal > 0
 	shortCond := hBear && aBear && atBear && admoVal < 0 && atsoVal < 0
 
-	// 4️⃣ Position management
-	posQty, _ := t.exec.Position(t.symbol)
+	posQty, _ := t.Exec.Position(t.Symbol)
 
 	switch {
 	case longCond && posQty <= 0:
-		// Close short (if any) then go long
 		if posQty < 0 {
-			t.closePosition(close)
+			t.closePosition(close, "trendcomp_close_short")
 		}
-		t.openPosition(types.Buy, close)
+		t.openLong(close)
 
 	case shortCond && posQty >= 0:
-		// Close long (if any) then go short
 		if posQty > 0 {
-			t.closePosition(close)
+			t.closePosition(close, "trendcomp_close_long")
 		}
-		t.openPosition(types.Sell, close)
+		t.openShort(close)
 
-	// Optional trailing‑stop logic (run every bar)
-	case posQty != 0:
+	case posQty != 0 && t.Cfg.TrailingPct > 0:
+		// Optional trailing‑stop logic.
 		t.applyTrailingStop(close)
 	}
 }
 
-// openPosition creates a market order sized by risk.
-func (t *TrendComposite) openPosition(side types.Side, price float64) {
-	qty := risk.CalcQty(t.exec.Equity(), t.cfg.MaxRiskPerTrade, t.cfg.StopLossPct, price)
+// openLong creates a long order sized by the generic risk calculator.
+func (t *TrendComposite) openLong(price float64) {
+	qty := t.calcQty(price)
 	if qty <= 0 {
 		return
 	}
 	o := types.Order{
-		Symbol:  t.symbol,
-		Side:    side,
+		Symbol:  t.Symbol,
+		Side:    types.Buy,
 		Qty:     qty,
-		Price:   price, // market price – could be 0 for true market order
-		Comment: "TrendComposite entry",
+		Price:   price,
+		Comment: "TrendComposite entry long",
 	}
-	if err := t.exec.Submit(o); err != nil {
-		log.Printf("[ERR] submit entry: %v", err)
-	}
-	t.lastDir = map[types.Side]int{types.Buy: 1, types.Sell: -1}[side]
+	_ = t.submitOrder(o, "trendcomp_long")
+	t.lastDir = 1
 }
 
-// closePosition exits the current position at market price.
-func (t *TrendComposite) closePosition(price float64) {
-	qty, _ := t.exec.Position(t.symbol)
+// openShort creates a short order sized by the generic risk calculator.
+func (t *TrendComposite) openShort(price float64) {
+	qty := t.calcQty(price)
+	if qty <= 0 {
+		return
+	}
+	o := types.Order{
+		Symbol:  t.Symbol,
+		Side:    types.Sell,
+		Qty:     qty,
+		Price:   price,
+		Comment: "TrendComposite entry short",
+	}
+	_ = t.submitOrder(o, "trendcomp_short")
+	t.lastDir = -1
+}
+
+// closePosition flattens the current position at market price.
+func (t *TrendComposite) closePosition(price float64, ctx string) {
+	qty, _ := t.Exec.Position(t.Symbol)
 	if qty == 0 {
 		return
 	}
@@ -121,38 +133,12 @@ func (t *TrendComposite) closePosition(price float64) {
 		side = types.Buy
 	}
 	o := types.Order{
-		Symbol:  t.symbol,
+		Symbol:  t.Symbol,
 		Side:    side,
 		Qty:     math.Abs(qty),
 		Price:   price,
 		Comment: "TrendComposite exit",
 	}
-	if err := t.exec.Submit(o); err != nil {
-		log.Printf("[ERR] submit exit: %v", err)
-	}
+	_ = t.submitOrder(o, ctx)
 	t.lastDir = 0
-}
-
-// applyTrailingStop moves the stop‑loss toward market price.
-func (t *TrendComposite) applyTrailingStop(currentPrice float64) {
-	if t.cfg.TrailingPct <= 0 {
-		return
-	}
-	qty, avg := t.exec.Position(t.symbol)
-	if qty == 0 {
-		return
-	}
-	var trailLevel float64
-	if qty > 0 { // long
-		trailLevel = avg * (1 + t.cfg.TrailingPct)
-		if currentPrice >= trailLevel {
-			// lock in profit – close the position
-			t.closePosition(currentPrice)
-		}
-	} else { // short
-		trailLevel = avg * (1 - t.cfg.TrailingPct)
-		if currentPrice <= trailLevel {
-			t.closePosition(currentPrice)
-		}
-	}
 }
