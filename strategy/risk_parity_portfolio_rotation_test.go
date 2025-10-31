@@ -3,82 +3,31 @@ package strategy
 import (
 	"testing"
 
-	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/testutils"
 	"github.com/evdnx/gots/types"
 )
 
-// feedBars sends a slice of candles to the specified symbol inside the
-// RiskParityRotation manager.
-func feedBarsRiskParity(t *testing.T, rp *RiskParityRotation, symbol string, bars []candle) {
-	for _, b := range bars {
-		rp.ProcessBar(symbol, b.high, b.low, b.close, b.volume)
-	}
-}
-
-// buildRiskParity creates a RiskParityRotation instance wired to a mock
-// executor / logger.  All oscillator thresholds are set to extreme values
-// so the RSI/MFI parts of the composite strength are effectively zero;
-// the ATSO magnitude (derived from price volatility) will dominate the
-// ranking, which makes the expected behaviour deterministic.
-func buildRiskParity(t *testing.T,
-	symbols []string, topK, intervalBars int) (*RiskParityRotation, *testutils.MockExecutor) {
-
-	// Extreme thresholds – RSI/MFI never influence the strength score.
-	cfg := config.StrategyConfig{
-		RSIOverbought:     1e9,
-		RSIOversold:       -1e9,
-		MFIOverbought:     1e9,
-		MFIOversold:       -1e9,
-		HMAPeriod:         9,
-		ATSEMAperiod:      5,
-		MaxRiskPerTrade:   0.01,  // 1 % of equity per trade
-		StopLossPct:       0.015, // 1.5 %
-		TakeProfitPct:     0.0,   // not needed for these tests
-		TrailingPct:       0.0,   // not needed for these tests
-		QuantityPrecision: 2,
-		MinQty:            0.001,
-		StepSize:          0.0001,
-	}
-
-	mockExec := testutils.NewMockExecutor(10_000) // $10 k start equity
-	mockLog := testutils.NewMockLogger()
-
-	rp, err := NewRiskParityRotation(symbols, cfg, mockExec, topK, intervalBars, mockLog)
-	if err != nil {
-		t.Fatalf("NewRiskParityRotation failed: %v", err)
-	}
-	return rp, mockExec
-}
-
 /*
 -----------------------------------------------------------------------
-Test 1 – Initial rebalance opens positions for the top‑K symbols.
+Test 1 – Initial rebalance opens a position for the top‑K symbol.
 -----------------------------------------------------------------------
-We use three symbols and `topK = 1`.  By feeding a **high‑volatility**
-bar to “AAA” and a flat bar to “BBB”, the ATSO magnitude for “AAA”
-will be larger, so its composite strength will be higher.  After the
-first interval the manager should open a position for “AAA”.
+We use two symbols, `topK = 1`, and a single‑bar interval.
+“AAA” receives a volatile bar (large ATSO magnitude) while “BBB” gets a
+flat bar, so the strength of AAA is higher and the manager should open a
+BUY order for AAA.
 */
 func TestRiskParity_InitialRebalanceOpensTopK(t *testing.T) {
 	symbols := []string{"AAA", "BBB"}
 	rp, exec := buildRiskParity(t, symbols, 1, 1)
 
-	// ---- Bar 1 – volatile bar for AAA (large price swing) ----
-	volBarAAA := []candle{
-		{high: 110, low: 90, close: 100, volume: 1500},
-	}
-	feedBarsRiskParity(t, rp, "AAA", volBarAAA)
+	// ---- volatile bar for AAA ----
+	rp.ProcessBar("AAA", 110, 90, 100, 1500)
 
-	// ---- Bar 1 – flat bar for BBB (tiny swing) ----
-	flatBarBBB := []candle{
-		{high: 101, low: 99, close: 100, volume: 1500},
-	}
-	feedBarsRiskParity(t, rp, "BBB", flatBarBBB)
+	// ---- flat bar for BBB ----
+	rp.ProcessBar("BBB", 101, 99, 100, 1500)
 
 	// After processing both symbols the interval (1 bar) has elapsed,
-	// triggering a rebalance.  Expect exactly one order for the strongest
-	// symbol (“AAA”).
+	// triggering a rebalance.
 	if len(exec.Orders()) != 1 {
 		t.Fatalf("expected one order after initial rebalance, got %d", len(exec.Orders()))
 	}
@@ -96,47 +45,46 @@ func TestRiskParity_InitialRebalanceOpensTopK(t *testing.T) {
 
 /*
 -----------------------------------------------------------------------
-Test 2 – Manager switches positions when the top‑K changes.
+Test 2 – Top‑K changes on the next interval → old position closed,
+new position opened.
 -----------------------------------------------------------------------
-1️⃣ First interval: “AAA” is volatile → position opened for AAA.
-2️⃣ Second interval: “BBB” becomes volatile while AAA goes flat → the
-
-	manager should close AAA and open a new position for BBB.
+Interval = 1, `topK = 1`.  First interval: AAA volatile → position opened.
+Second interval: BBB becomes volatile, AAA becomes flat → manager should
+close AAA and open a position for BBB.
 */
 func TestRiskParity_SwitchesPositionsWhenTopKChanges(t *testing.T) {
 	symbols := []string{"AAA", "BBB"}
 	rp, exec := buildRiskParity(t, symbols, 1, 1)
 
-	// ---- Interval 1 – AAA volatile, BBB flat (opens AAA) ----
-	feedBarsRiskParity(t, rp, "AAA", []candle{{high: 110, low: 90, close: 100, volume: 1500}})
-	feedBarsRiskParity(t, rp, "BBB", []candle{{high: 101, low: 99, close: 100, volume: 1500}})
+	/* ---------- Interval 1 – AAA volatile, BBB flat ---------- */
+	rp.ProcessBar("AAA", 110, 90, 100, 1500) // high ATSO magnitude
+	rp.ProcessBar("BBB", 101, 99, 100, 1500) // low ATSO magnitude
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Symbol != "AAA" {
 		t.Fatalf("expected initial order for AAA, got %+v", exec.Orders())
 	}
-	aaaOrderQty := exec.Orders()[0].Qty
+	aaaQty := exec.Orders()[0].Qty
 
-	// ---- Interval 2 – BBB volatile, AAA flat (should swap) ----
-	feedBarsRiskParity(t, rp, "AAA", []candle{{high: 101, low: 99, close: 100, volume: 1500}})
-	feedBarsRiskParity(t, rp, "BBB", []candle{{high: 120, low: 80, close: 100, volume: 1500}})
+	/* ---------- Interval 2 – BBB volatile, AAA flat ---------- */
+	rp.ProcessBar("AAA", 101, 99, 100, 1500) // now flat
+	rp.ProcessBar("BBB", 120, 80, 100, 1500) // high ATSO magnitude
 
 	/*
 	   After the second interval we expect two additional orders:
-	     1. Close AAA (SELL) – quantity must match the original AAA order.
-	     2. Open BBB (BUY or SELL depending on ATSO sign).
+	     1. Close AAA (SELL)
+	     2. Open BBB (BUY or SELL depending on ATSO sign)
 	*/
 	if len(exec.Orders()) != 3 {
-		t.Fatalf("expected three total orders after swap, got %d: %+v", len(exec.Orders()), exec.Orders())
+		t.Fatalf("expected three total orders after switch, got %d: %+v", len(exec.Orders()), exec.Orders())
 	}
 	closeAAA := exec.Orders()[1]
-	openBBB := exec.Orders()[2]
-
 	if closeAAA.Symbol != "AAA" || closeAAA.Side != types.Sell {
 		t.Fatalf("expected SELL order to close AAA, got %+v", closeAAA)
 	}
-	if closeAAA.Qty != aaaOrderQty {
-		t.Fatalf("close‑AAA quantity (%f) should equal original AAA quantity (%f)", closeAAA.Qty, aaaOrderQty)
+	if closeAAA.Qty != aaaQty {
+		t.Fatalf("close‑AAA quantity (%f) should equal original AAA quantity (%f)", closeAAA.Qty, aaaQty)
 	}
+	openBBB := exec.Orders()[2]
 	if openBBB.Symbol != "BBB" {
 		t.Fatalf("expected new order for BBB, got %s", openBBB.Symbol)
 	}
@@ -147,34 +95,35 @@ func TestRiskParity_SwitchesPositionsWhenTopKChanges(t *testing.T) {
 
 /*
 -----------------------------------------------------------------------
-Test 3 – All strengths drop to zero → manager closes any open positions.
+Test 3 – All strengths drop to zero → any open position is closed.
 -----------------------------------------------------------------------
-We first open a position for “AAA” (volatile bar).  Then we feed flat
-bars for *both* symbols, which yields an ATSO magnitude of essentially
-zero, making every composite strength zero.  The next rebalance should
-close the existing position.
+First interval opens a position for AAA (volatile bar).  Second interval
+supplies flat bars for both symbols, making ATSO magnitude ≈ 0, so the
+composite strength becomes zero for every symbol.  The manager should
+close the AAA position.
 */
 func TestRiskParity_ClosesAllWhenNoStrength(t *testing.T) {
 	symbols := []string{"AAA", "BBB"}
 	rp, exec := buildRiskParity(t, symbols, 1, 1)
 
-	// ---- Interval 1 – open AAA (volatile) ----
-	feedBarsRiskParity(t, rp, "AAA", []candle{{high: 110, low: 90, close: 100, volume: 1500}})
-	feedBarsRiskParity(t, rp, "BBB", []candle{{high: 101, low: 99, close: 100, volume: 1500}})
+	/* ---------- Interval 1 – open AAA ---------- */
+	rp.ProcessBar("AAA", 110, 90, 100, 1500) // volatile → strength > 0
+	rp.ProcessBar("BBB", 101, 99, 100, 1500) // flat → strength ≈ 0
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Symbol != "AAA" {
 		t.Fatalf("expected initial order for AAA, got %+v", exec.Orders())
 	}
 	aaaQty := exec.Orders()[0].Qty
 
-	// ---- Interval 2 – flat bars for both symbols (strength ≈ 0) ----
+	/* ---------- Interval 2 – flat bars for both ---------- */
 	flat := []candle{{high: 101, low: 99, close: 100, volume: 1500}}
-	feedBarsRiskParity(t, rp, "AAA", flat)
-	feedBarsRiskParity(t, rp, "BBB", flat)
+	// Feed flat bar to both symbols.
+	rp.ProcessBar("AAA", flat[0].high, flat[0].low, flat[0].close, flat[0].volume)
+	rp.ProcessBar("BBB", flat[0].high, flat[0].low, flat[0].close, flat[0].volume)
 
 	/*
-	   After the second interval the manager should issue a single
-	   SELL order that closes the AAA position.
+	   After the second interval the manager should issue a SELL order that
+	   closes the AAA position.
 	*/
 	if len(exec.Orders()) != 2 {
 		t.Fatalf("expected a second order to close AAA, got %d: %+v", len(exec.Orders()), exec.Orders())
@@ -190,38 +139,18 @@ func TestRiskParity_ClosesAllWhenNoStrength(t *testing.T) {
 
 /*
 -----------------------------------------------------------------------
-Test 4 – Constructor rejects invalid topK values.
+Test 4 – Invalid topK is rejected (already covered in the helper,
+but we keep a sanity‑check here).
 -----------------------------------------------------------------------
-The `NewRiskParityRotation` function should return an error when
-`topK <= 0` or `topK > len(symbols)`.  This test verifies the guard.
 */
 func TestRiskParity_InvalidTopK(t *testing.T) {
 	symbols := []string{"AAA", "BBB"}
-	mockExec := testutils.NewMockExecutor(10_000)
-	mockLog := testutils.NewMockLogger()
-
-	cfg := config.StrategyConfig{
-		RSIOverbought:     1e9,
-		RSIOversold:       -1e9,
-		MFIOverbought:     1e9,
-		MFIOversold:       -1e9,
-		HMAPeriod:         9,
-		ATSEMAperiod:      5,
-		MaxRiskPerTrade:   0.01,
-		StopLossPct:       0.015,
-		TakeProfitPct:     0.0,
-		TrailingPct:       0.0,
-		QuantityPrecision: 2,
-		MinQty:            0.001,
-		StepSize:          0.0001,
-	}
-
-	// topK = 0 (invalid)
-	if _, err := NewRiskParityRotation(symbols, cfg, mockExec, 0, 1, mockLog); err == nil {
+	_, err := NewRiskParityRotation(symbols, buildConfig(), testutils.NewMockExecutor(10_000), 0, 1, testutils.NewMockLogger())
+	if err == nil {
 		t.Fatalf("expected error for topK=0, got nil")
 	}
-	// topK > len(symbols) (invalid)
-	if _, err := NewRiskParityRotation(symbols, cfg, mockExec, 3, 1, mockLog); err == nil {
+	_, err = NewRiskParityRotation(symbols, buildConfig(), testutils.NewMockExecutor(10_000), 3, 1, testutils.NewMockLogger())
+	if err == nil {
 		t.Fatalf("expected error for topK > len(symbols), got nil")
 	}
 }

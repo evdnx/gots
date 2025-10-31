@@ -3,77 +3,20 @@ package strategy
 import (
 	"testing"
 
-	"github.com/evdnx/goti"
-	"github.com/evdnx/gots/config"
-	"github.com/evdnx/gots/testutils"
 	"github.com/evdnx/gots/types"
 )
-
-// feedBars sends a slice of candles to the supplied MultiTF instance.
-func feedBarsMTF(t *testing.T, mtf *MultiTF, bars []candle) {
-	for _, b := range bars {
-		mtf.ProcessBar(b.high, b.low, b.close, b.volume)
-	}
-}
-
-// buildMultiTF creates a MultiTF strategy wired to a mock executor and logger.
-// All oscillator thresholds are set to extreme values so the RSI/MFI/VWAO
-// checks never block a trade – the only gating factor is the HMA crossover
-// on both time‑frames.
-func buildMultiTF(t *testing.T, fastSec, slowSec int) (*MultiTF, *testutils.MockExecutor) {
-	// Extremely permissive thresholds – they will never reject a trade.
-	cfg := config.StrategyConfig{
-		RSIOverbought:     1e9,
-		RSIOversold:       -1e9,
-		MFIOverbought:     1e9,
-		MFIOversold:       -1e9,
-		VWAOStrongTrend:   1e9, // not used by this strategy
-		HMAPeriod:         9,
-		ATSEMAperiod:      5,
-		MaxRiskPerTrade:   0.01,  // 1 % of equity per trade
-		StopLossPct:       0.015, // 1.5 %
-		TakeProfitPct:     0.0,   // enable per‑test when needed
-		TrailingPct:       0.0,   // enable per‑test when needed
-		QuantityPrecision: 2,
-		MinQty:            0.001,
-		StepSize:          0.0001,
-	}
-
-	mockExec := testutils.NewMockExecutor(10_000) // $10 k start equity
-	mockLog := testutils.NewMockLogger()
-
-	// Suite factory – returns a *real* goti suite.
-	suiteFactory := func() (*goti.IndicatorSuite, error) {
-		ic := goti.DefaultConfig()
-		ic.RSIOverbought = cfg.RSIOverbought
-		ic.RSIOversold = cfg.RSIOversold
-		ic.MFIOverbought = cfg.MFIOverbought
-		ic.MFIOversold = cfg.MFIOversold
-		ic.ATSEMAperiod = cfg.ATSEMAperiod
-		return goti.NewIndicatorSuiteWithConfig(ic)
-	}
-
-	mtf, err := NewMultiTF("TEST", cfg, mockExec, mockLog, fastSec, slowSec)
-	if err != nil {
-		t.Fatalf("NewMultiTF failed: %v", err)
-	}
-	// The constructor already created its own fastSuite/slowSuite via the
-	// suiteFactory, so we don't need to replace anything.
-	_ = suiteFactory // silence unused‑var warning (kept for symmetry)
-	return mtf, mockExec
-}
 
 /*
 -----------------------------------------------------------------------
 Test 1 – Bullish crossovers on BOTH time‑frames → LONG entry.
 -----------------------------------------------------------------------
 An upward price ramp creates a bullish HMA crossover after the warm‑up
-period (≈10 bars).  Because we feed the *same* bar to both fast and
+period (≈10 bars).  Because we feed the same bar to both fast and
 slow suites, both will cross at roughly the same time, satisfying the
 `longCond` check.
 */
 func TestMultiTF_LongEntry(t *testing.T) {
-	mtf, exec := buildMultiTF(t, 60, 300)
+	mt, exec := buildMultiTF(t, 60, 300)
 
 	// 15 upward bars – enough for warm‑up and to trigger crossovers.
 	var bars []candle
@@ -86,7 +29,7 @@ func TestMultiTF_LongEntry(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsMTF(t, mtf, bars)
+	feedBars(t, mt, bars)
 
 	if len(exec.Orders()) != 1 {
 		t.Fatalf("expected exactly one BUY order, got %d", len(exec.Orders()))
@@ -106,7 +49,7 @@ Test 2 – Bearish crossovers on BOTH time‑frames → SHORT entry.
 -----------------------------------------------------------------------
 */
 func TestMultiTF_ShortEntry(t *testing.T) {
-	mtf, exec := buildMultiTF(t, 60, 300)
+	mt, exec := buildMultiTF(t, 60, 300)
 
 	// 15 downward bars.
 	var bars []candle
@@ -119,7 +62,7 @@ func TestMultiTF_ShortEntry(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsMTF(t, mtf, bars)
+	feedBars(t, mt, bars)
 
 	if len(exec.Orders()) != 1 {
 		t.Fatalf("expected exactly one SELL order, got %d", len(exec.Orders()))
@@ -138,15 +81,15 @@ func TestMultiTF_ShortEntry(t *testing.T) {
 Test 3 – Trailing‑stop while a long position is open.
 -----------------------------------------------------------------------
 1️⃣ Open a long (upward ramp).
-2️⃣ Raise the price so that the trailing‑stop level (entry *
+2️⃣ Raise the price so that the trailing‑stop level (`entry *
 
-	(1+TrailingPct)) is breached → a SELL order should close the position.
+	(1+TrailingPct)`) is breached → a SELL order should close the position.
 */
 func TestMultiTF_TrailingStop(t *testing.T) {
-	mtf, exec := buildMultiTF(t, 60, 300)
+	mt, exec := buildMultiTF(t, 60, 300)
 
 	// Enable trailing stop (2 %).
-	mtf.Cfg.TrailingPct = 0.02
+	mt.Cfg.TrailingPct = 0.02
 
 	// ---- Phase 1 – long entry (upward ramp) ----
 	var up []candle
@@ -159,7 +102,7 @@ func TestMultiTF_TrailingStop(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsMTF(t, mtf, up)
+	feedBars(t, mt, up)
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Side != types.Buy {
 		t.Fatalf("expected initial BUY order, got %+v", exec.Orders())
@@ -171,7 +114,7 @@ func TestMultiTF_TrailingStop(t *testing.T) {
 	high := trailingLevel + 0.5
 	low := trailingLevel - 0.5
 	close := trailingLevel + 0.1
-	feedBarsMTF(t, mtf, []candle{{high, low, close, 1200}})
+	feedBars(t, mt, []candle{{high, low, close, 1200}})
 
 	if len(exec.Orders()) != 2 {
 		t.Fatalf("expected trailing‑stop close order, got %d (orders: %+v)", len(exec.Orders()), exec.Orders())
@@ -193,10 +136,10 @@ The strategy uses `TakeProfitPct` as an ATR‑multiple.  We set it to 2.0;
 with an ATSO value ≈2 the TP level becomes `entry + 2*ATR`.
 */
 func TestMultiTF_TakeProfit(t *testing.T) {
-	mtf, exec := buildMultiTF(t, 60, 300)
+	mt, exec := buildMultiTF(t, 60, 300)
 
 	// Enable TP (ATR‑multiple = 2).
-	mtf.Cfg.TakeProfitPct = 2.0
+	mt.Cfg.TakeProfitPct = 2.0
 
 	// ---- Phase 1 – long entry (upward ramp) ----
 	var up []candle
@@ -209,21 +152,19 @@ func TestMultiTF_TakeProfit(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsMTF(t, mtf, up)
+	feedBars(t, mt, up)
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Side != types.Buy {
 		t.Fatalf("expected initial BUY order, got %+v", exec.Orders())
 	}
 	entryPrice := exec.Orders()[0].Price
 
-	// ---- Phase 2 – price reaches TP (entry + 2*ATR) ----
-	// For a smooth upward ramp the ATSO value settles around 2.
-	// TP = entry + 2*2 = entry + 4.
+	// ---- price reaches TP (entry + 2*ATR).  ATSO≈2 for this series.
 	tpLevel := entryPrice + 4.0
 	high := tpLevel + 0.5
 	low := tpLevel - 0.5
 	close := tpLevel + 0.1
-	feedBarsMTF(t, mtf, []candle{{high, low, close, 1300}})
+	feedBars(t, mt, []candle{{high, low, close, 1300}})
 
 	if len(exec.Orders()) != 2 {
 		t.Fatalf("expected TP close order, got %d (orders: %+v)", len(exec.Orders()), exec.Orders())
@@ -247,7 +188,7 @@ Test 5 – Opposite‑side flip (short after long).
 	the long (SELL) and then open a new short (SELL).
 */
 func TestMultiTF_OppositeSideFlip(t *testing.T) {
-	mtf, exec := buildMultiTF(t, 60, 300)
+	mt, exec := buildMultiTF(t, 60, 300)
 
 	// ---- Phase 1 – long entry (upward ramp) ----
 	var up []candle
@@ -260,7 +201,7 @@ func TestMultiTF_OppositeSideFlip(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsMTF(t, mtf, up)
+	feedBars(t, mt, up)
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Side != types.Buy {
 		t.Fatalf("expected initial BUY order, got %+v", exec.Orders())
@@ -270,7 +211,7 @@ func TestMultiTF_OppositeSideFlip(t *testing.T) {
 	// ---- Phase 2 – bearish crossover (downward ramp) ----
 	var down []candle
 	for i := 1; i <= 15; i++ {
-		price := 115.0 - float64(i)
+		price := 115.0 - float64(i) // 114 … 100
 		down = append(down, candle{
 			high:   price + 0.5,
 			low:    price - 0.5,
@@ -278,7 +219,7 @@ func TestMultiTF_OppositeSideFlip(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsMTF(t, mtf, down)
+	feedBars(t, mt, down)
 
 	/*
 	   Expected order flow:

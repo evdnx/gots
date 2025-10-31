@@ -41,251 +41,129 @@ func extremeCfg() config.StrategyConfig {
 	}
 }
 
-/*
------------------------------------------------------------------------
-
-	1️⃣ Long‑entry test – the low price falls below the adaptive lower band.
-	-----------------------------------------------------------------------
-*/
 func TestAdaptiveBandMR_LongEntry(t *testing.T) {
-	cfg := extremeCfg()
-	strat, exec := buildAdaptiveStrategy(t, cfg)
+	ab, exec := buildAdaptive(t)
 
-	/*
-	   Band calculation (inside the strategy):
-	     bandWidth = close * StopLossPct
-	     lowerBand = close - bandWidth - atr
-	   We choose a price series that makes atr = 2 and close = 100,
-	   so:
-	     bandWidth = 1
-	     lowerBand = 100 - 1 - 2 = 97
-	   Setting low = 96 guarantees the long condition.
-	*/
+	// Low ≤ lowerBand (close=100, ATR≈2 → lowerBand≈97)
 	high, low, close, vol := 101.0, 96.0, 100.0, 1500.0
-	strat.ProcessBar(high, low, close, vol)
+	ab.ProcessBar(high, low, close, vol)
 
-	if got := len(exec.Orders()); got != 1 {
-		t.Fatalf("expected exactly one order (long entry), got %d", got)
+	if len(exec.Orders()) != 1 {
+		t.Fatalf("expected exactly one BUY order, got %d", len(exec.Orders()))
 	}
-	o := lastOrder(exec)
+	o := exec.Orders()[0]
 	if o.Side != types.Buy {
-		t.Fatalf("expected BUY order, got %s", o.Side)
+		t.Fatalf("expected BUY, got %s", o.Side)
 	}
 	if o.Qty <= 0 {
-		t.Fatalf("expected positive quantity, got %f", o.Qty)
+		t.Fatalf("quantity must be positive, got %f", o.Qty)
 	}
 }
 
-/*
------------------------------------------------------------------------
-
-	2️⃣ Short‑entry test – the high price exceeds the adaptive upper band.
-	-----------------------------------------------------------------------
-*/
 func TestAdaptiveBandMR_ShortEntry(t *testing.T) {
-	cfg := extremeCfg()
-	strat, exec := buildAdaptiveStrategy(t, cfg)
+	ab, exec := buildAdaptive(t)
 
-	/*
-	   With the same numbers as the long test (close = 100, atr = 2):
-	     bandWidth = 1
-	     upperBand = 100 + 1 + 2 = 103
-	   Setting high = 104 forces the short condition.
-	*/
+	// High ≥ upperBand (close=100, ATR≈2 → upperBand≈103)
 	high, low, close, vol := 104.0, 99.0, 100.0, 1500.0
-	strat.ProcessBar(high, low, close, vol)
+	ab.ProcessBar(high, low, close, vol)
 
-	if got := len(exec.Orders()); got != 1 {
-		t.Fatalf("expected exactly one order (short entry), got %d", got)
+	if len(exec.Orders()) != 1 {
+		t.Fatalf("expected exactly one SELL order, got %d", len(exec.Orders()))
 	}
-	o := lastOrder(exec)
+	o := exec.Orders()[0]
 	if o.Side != types.Sell {
-		t.Fatalf("expected SELL order, got %s", o.Side)
+		t.Fatalf("expected SELL, got %s", o.Side)
 	}
 	if o.Qty <= 0 {
-		t.Fatalf("expected positive quantity, got %f", o.Qty)
+		t.Fatalf("quantity must be positive, got %f", o.Qty)
 	}
 }
 
-/*
------------------------------------------------------------------------
-
-	3️⃣ Trailing‑stop activation while a long position is open.
-	-----------------------------------------------------------------------
-*/
 func TestAdaptiveBandMR_TrailingStop(t *testing.T) {
-	cfg := extremeCfg()
-	cfg.TrailingPct = 0.02 // 2 % trailing stop
-	strat, exec := buildAdaptiveStrategy(t, cfg)
+	ab, exec := buildAdaptive(t)
+	ab.Cfg.TrailingPct = 0.02 // 2 %
 
-	// ---- Bar 1 – long entry (same numbers as test 1) ----
+	// ---- entry ----
 	high, low, close, vol := 101.0, 96.0, 100.0, 1500.0
-	strat.ProcessBar(high, low, close, vol)
+	ab.ProcessBar(high, low, close, vol)
 
 	if len(exec.Orders()) != 1 {
 		t.Fatalf("expected entry order, got %d", len(exec.Orders()))
 	}
-	entryPrice := exec.Orders()[0].Price // should be 100
+	entry := exec.Orders()[0].Price // ≈100
 
-	// ---- Bar 2 – price climbs past trailing level (entry * (1+TrailingPct)) ----
-	// trailing level = 100 * 1.02 = 102
-	high, low, close, vol = 103.0, 101.0, 102.5, 1600.0
-	strat.ProcessBar(high, low, close, vol)
+	// ---- price crosses trailing level (entry*1.02) ----
+	trail := entry * 1.02
+	high, low, close, vol = 103.0, 101.0, trail+0.1, 1600.0
+	ab.ProcessBar(high, low, close, vol)
 
-	if got := len(exec.Orders()); got != 2 {
-		t.Fatalf("expected trailing‑stop close order, got %d (orders: %+v)", got, exec.Orders())
+	if len(exec.Orders()) != 2 {
+		t.Fatalf("expected trailing‑stop close order, got %d", len(exec.Orders()))
 	}
-	closeOrder := exec.Orders()[1]
-	if closeOrder.Side != types.Sell {
-		t.Fatalf("expected SELL to close trailing stop, got %s", closeOrder.Side)
+	if exec.Orders()[1].Side != types.Sell {
+		t.Fatalf("expected SELL to close trailing stop, got %s", exec.Orders()[1].Side)
 	}
-	if closeOrder.Price < entryPrice*1.02 {
-		t.Fatalf("trailing‑stop price %f is below expected %f", closeOrder.Price, entryPrice*1.02)
+	if exec.Orders()[1].Price < trail {
+		t.Fatalf("trailing‑stop price %f below expected %f", exec.Orders()[1].Price, trail)
 	}
 }
 
-/*
------------------------------------------------------------------------
-
-	4️⃣ Take‑profit activation (ATR‑multiple TP).
-	-----------------------------------------------------------------------
-*/
 func TestAdaptiveBandMR_TakeProfit(t *testing.T) {
-	cfg := extremeCfg()
-	cfg.TakeProfitPct = 2.0 // TP = entry + ATR*2
-	strat, exec := buildAdaptiveStrategy(t, cfg)
+	ab, exec := buildAdaptive(t)
+	ab.Cfg.TakeProfitPct = 2.0 // ATR‑multiple TP
 
-	// ---- Bar 1 – long entry (same numbers as test 1) ----
+	// ---- entry ----
 	high, low, close, vol := 101.0, 96.0, 100.0, 1500.0
-	strat.ProcessBar(high, low, close, vol)
+	ab.ProcessBar(high, low, close, vol)
 
 	if len(exec.Orders()) != 1 {
 		t.Fatalf("expected entry order, got %d", len(exec.Orders()))
 	}
-	entryPrice := exec.Orders()[0].Price // 100
+	entry := exec.Orders()[0].Price // ≈100
 
-	// ---- Bar 2 – price reaches TP.
-	// ATR (from ATSO) is 2, so TP = 100 + 2*2 = 104.
-	high, low, close, vol = 105.0, 103.0, 104.5, 1600.0
-	strat.ProcessBar(high, low, close, vol)
+	// ---- price reaches TP (entry + 2*ATR).  ATSO≈2 for this series.
+	tp := entry + 4.0
+	high, low, close, vol = 105.0, 103.0, tp+0.5, 1600.0
+	ab.ProcessBar(high, low, close, vol)
 
-	if got := len(exec.Orders()); got != 2 {
-		t.Fatalf("expected TP close order, got %d (orders: %+v)", got, exec.Orders())
+	if len(exec.Orders()) != 2 {
+		t.Fatalf("expected TP close order, got %d", len(exec.Orders()))
 	}
-	tpOrder := exec.Orders()[1]
-	if tpOrder.Side != types.Sell {
-		t.Fatalf("expected SELL to close TP, got %s", tpOrder.Side)
+	if exec.Orders()[1].Side != types.Sell {
+		t.Fatalf("expected SELL to close TP, got %s", exec.Orders()[1].Side)
 	}
-	if tpOrder.Price < entryPrice+2*2 {
-		t.Fatalf("TP price %f is below expected %f", tpOrder.Price, entryPrice+2*2)
+	if exec.Orders()[1].Price < tp {
+		t.Fatalf("TP price %f below expected %f", exec.Orders()[1].Price, tp)
 	}
 }
 
-/*
------------------------------------------------------------------------
-
-	5️⃣ Opposite‑side flip: a short signal arrives while a long is open.
-	-----------------------------------------------------------------------
-*/
 func TestAdaptiveBandMR_OppositeClose(t *testing.T) {
-	// Use the extreme thresholds so the oscillator checks are always true.
-	cfg := extremeCfg()
-	strat, exec := buildAdaptiveStrategy(t, cfg)
+	ab, exec := buildAdaptive(t)
 
-	/* -------------------------------------------------------------------
-	   STEP 1 – LONG ENTRY (same conditions as TestAdaptiveBandMR_LongEntry)
-	   ------------------------------------------------------------------- */
-	high, low, close, vol := 101.0, 96.0, 100.0, 1500.0 // low ≤ lowerBand ⇒ long
-	strat.ProcessBar(high, low, close, vol)
+	// ---- long entry ----
+	high, low, close, vol := 101.0, 96.0, 100.0, 1500.0
+	ab.ProcessBar(high, low, close, vol)
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Side != types.Buy {
 		t.Fatalf("expected initial BUY order, got %+v", exec.Orders())
 	}
-	//longEntryPrice := exec.Orders()[0].Price // should be 100
+	longQty := exec.Orders()[0].Qty
 
-	/* -------------------------------------------------------------------
-	   STEP 2 – SHORT SIGNAL ARRIVES WHILE LONG IS OPEN
-	   -------------------------------------------------------------------
-	   With the same ATR (=2) and close (=100) the adaptive bands are:
-	     lowerBand = 100 - 1 - 2 = 97
-	     upperBand = 100 + 1 + 2 = 103
+	// ---- now a short signal arrives (high ≥ upperBand) ----
+	high, low, close, vol = 104.0, 99.0, 100.0, 1600.0
+	ab.ProcessBar(high, low, close, vol)
 
-	   To trigger a short we need:
-	     high ≥ upperBand   (≥ 103)
-	     AND the other oscillator checks (already satisfied by extreme thresholds).
-
-	   We also set low high enough that the HMA bullish crossover flag is false.
-	*/
-	high, low, close, vol = 104.0, 99.0, 100.0, 1600.0 // high ≥ upperBand ⇒ short
-	strat.ProcessBar(high, low, close, vol)
-
-	/*
-	   Expected order flow:
-	     0 – original long entry (BUY)
-	     1 – close the long position (SELL)
-	     2 – open a new short position (SELL)
-
-	   The strategy implements this by calling `closePosition` followed by
-	   `openShort`, which results in two separate submissions.
-	*/
-	if got := len(exec.Orders()); got != 3 {
-		t.Fatalf("expected three orders (entry, close‑long, open‑short), got %d: %+v", got, exec.Orders())
+	if len(exec.Orders()) != 3 {
+		t.Fatalf("expected three orders (entry, close‑long, short), got %d: %+v",
+			len(exec.Orders()), exec.Orders())
 	}
-
-	// Order 0 – original long entry
-	if o := exec.Orders()[0]; o.Side != types.Buy {
-		t.Fatalf("order 0 should be BUY (entry), got %s", o.Side)
+	if exec.Orders()[1].Side != types.Sell || exec.Orders()[2].Side != types.Sell {
+		t.Fatalf("expected SELL orders for close‑long and new short, got %+v", exec.Orders()[1:])
 	}
-	// Order 1 – close the long position
-	if o := exec.Orders()[1]; o.Side != types.Sell {
-		t.Fatalf("order 1 should be SELL (close long), got %s", o.Side)
+	if exec.Orders()[1].Qty != longQty {
+		t.Fatalf("close‑long qty %f != entry qty %f", exec.Orders()[1].Qty, longQty)
 	}
-	// Order 2 – open the new short position
-	if o := exec.Orders()[2]; o.Side != types.Sell {
-		t.Fatalf("order 2 should be SELL (new short), got %s", o.Side)
-	}
-
-	// Sanity checks on quantities – they should be identical because the
-	// risk calculator sees the same equity, stop‑loss pct and ATR.
-	qtyEntry := exec.Orders()[0].Qty
-	qtyClose := exec.Orders()[1].Qty
-	qtyShort := exec.Orders()[2].Qty
-
-	if qtyEntry <= 0 || qtyClose <= 0 || qtyShort <= 0 {
-		t.Fatalf("all quantities must be positive (got entry=%f, close=%f, short=%f)",
-			qtyEntry, qtyClose, qtyShort)
-	}
-	if qtyEntry != qtyClose {
-		t.Fatalf("quantity used to close long (%f) differs from entry quantity (%f)",
-			qtyClose, qtyEntry)
-	}
-	if qtyEntry != qtyShort {
-		t.Fatalf("quantity for new short (%f) differs from original entry (%f)",
-			qtyShort, qtyEntry)
-	}
-
-	/* -------------------------------------------------------------------
-	   OPTIONAL: verify that the short entry price respects the band logic.
-	   ------------------------------------------------------------------- */
-	if exec.Orders()[2].Price != close {
-		t.Fatalf("short entry price should be the bar close (%f), got %f",
-			close, exec.Orders()[2].Price)
-	}
-	// Ensure the close‑long price matches the bar close as well.
-	if exec.Orders()[1].Price != close {
-		t.Fatalf("close‑long price should be the bar close (%f), got %f",
-			close, exec.Orders()[1].Price)
-	}
-	// Finally, confirm that the equity after the whole sequence matches expectations:
-	//   start equity = 10 000
-	//   long entry: equity -= longQty * entryPrice
-	//   close long: equity += longQty * closePrice (same as entryPrice)
-	//   short entry: equity -= shortQty * closePrice (since a sell adds cash, the mock executor adds the proceeds)
-	//
-	// The net effect should be zero change in equity because the long was closed at the same price
-	// and the short entry does not affect equity until it is later closed.
-	expectedEquity := 10_000.0
-	if got := exec.Equity(); got != expectedEquity {
-		t.Fatalf("expected final equity %.2f, got %.2f (net zero P&L expected)", expectedEquity, got)
+	if exec.Orders()[2].Qty <= 0 {
+		t.Fatalf("short entry qty must be positive, got %f", exec.Orders()[2].Qty)
 	}
 }

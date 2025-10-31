@@ -3,75 +3,20 @@ package strategy
 import (
 	"testing"
 
-	"github.com/evdnx/goti"
-	"github.com/evdnx/gots/config"
-	"github.com/evdnx/gots/testutils"
 	"github.com/evdnx/gots/types"
 )
-
-// feedBars sends a slice of candles to the supplied VolScaledPos instance.
-func feedBarsVolScaledPos(t *testing.T, vp *VolScaledPos, bars []candle) {
-	for _, b := range bars {
-		vp.ProcessBar(b.high, b.low, b.close, b.volume)
-	}
-}
-
-// buildVolScaled creates a VolScaledPos strategy wired to a mock executor
-// and logger. All oscillator thresholds are set to extreme values so the
-// RSI/MFI checks never block a trade – the only gating factor is the HMA
-// crossover and the ATSO magnitude.
-func buildVolScaled(t *testing.T) (*VolScaledPos, *testutils.MockExecutor) {
-	// Extremely permissive thresholds – they will never reject a trade.
-	cfg := config.StrategyConfig{
-		RSIOverbought:     1e9,
-		RSIOversold:       -1e9,
-		MFIOverbought:     1e9,
-		MFIOversold:       -1e9,
-		VWAOStrongTrend:   1e9, // not used by this strategy
-		HMAPeriod:         9,
-		ATSEMAperiod:      5,
-		MaxRiskPerTrade:   0.01,  // 1 % of equity per trade
-		StopLossPct:       0.015, // 1.5 %
-		TakeProfitPct:     0.0,   // enable per‑test when needed
-		TrailingPct:       0.0,   // enable per‑test when needed
-		QuantityPrecision: 2,
-		MinQty:            0.001,
-		StepSize:          0.0001,
-	}
-
-	mockExec := testutils.NewMockExecutor(10_000) // $10 k start equity
-	mockLog := testutils.NewMockLogger()
-
-	// Suite factory – returns a *real* goti suite.
-	suiteFactory := func() (*goti.IndicatorSuite, error) {
-		ic := goti.DefaultConfig()
-		ic.RSIOverbought = cfg.RSIOverbought
-		ic.RSIOversold = cfg.RSIOversold
-		ic.MFIOverbought = cfg.MFIOverbought
-		ic.MFIOversold = cfg.MFIOversold
-		ic.VWAOStrongTrend = cfg.VWAOStrongTrend
-		ic.ATSEMAperiod = cfg.ATSEMAperiod
-		return goti.NewIndicatorSuiteWithConfig(ic)
-	}
-
-	base, err := NewBaseStrategy("TEST", cfg, mockExec, suiteFactory, mockLog)
-	if err != nil {
-		t.Fatalf("NewBaseStrategy failed: %v", err)
-	}
-	vp := &VolScaledPos{BaseStrategy: base}
-	return vp, mockExec
-}
 
 /*
 -----------------------------------------------------------------------
 Test 1 – Bullish HMA crossover → long entry.
 -----------------------------------------------------------------------
 An upward price ramp creates a bullish HMA crossover after the warm‑up
-period (≈10 bars).  Because the thresholds are extreme, the RSI/MFI
-checks are always satisfied, so the strategy should emit a BUY order.
+period (≈10 bars).  Because the RSI/MFI thresholds are inverted in the
+test helpers, the oscillator checks are always satisfied, so the
+strategy should emit a BUY order.
 */
 func TestVolScaled_LongEntry(t *testing.T) {
-	vp, exec := buildVolScaled(t)
+	vs, exec := buildVolScaled(t)
 
 	// 15 upward bars – enough for warm‑up and to trigger the HMA crossover.
 	var bars []candle
@@ -84,7 +29,7 @@ func TestVolScaled_LongEntry(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsVolScaledPos(t, vp, bars)
+	feedBars(t, vs, bars)
 
 	if len(exec.Orders()) != 1 {
 		t.Fatalf("expected exactly one BUY order, got %d", len(exec.Orders()))
@@ -94,7 +39,7 @@ func TestVolScaled_LongEntry(t *testing.T) {
 		t.Fatalf("expected BUY order, got %s", o.Side)
 	}
 	if o.Qty <= 0 {
-		t.Fatalf("expected positive quantity, got %f", o.Qty)
+		t.Fatalf("quantity must be positive, got %f", o.Qty)
 	}
 }
 
@@ -106,7 +51,7 @@ A downward price ramp creates a bearish HMA crossover after warm‑up,
 leading to a SELL order.
 */
 func TestVolScaled_ShortEntry(t *testing.T) {
-	vp, exec := buildVolScaled(t)
+	vs, exec := buildVolScaled(t)
 
 	// 15 downward bars.
 	var bars []candle
@@ -119,7 +64,7 @@ func TestVolScaled_ShortEntry(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsVolScaledPos(t, vp, bars)
+	feedBars(t, vs, bars)
 
 	if len(exec.Orders()) != 1 {
 		t.Fatalf("expected exactly one SELL order, got %d", len(exec.Orders()))
@@ -129,7 +74,7 @@ func TestVolScaled_ShortEntry(t *testing.T) {
 		t.Fatalf("expected SELL order, got %s", o.Side)
 	}
 	if o.Qty <= 0 {
-		t.Fatalf("expected positive quantity, got %f", o.Qty)
+		t.Fatalf("quantity must be positive, got %f", o.Qty)
 	}
 }
 
@@ -144,10 +89,8 @@ Test 3 – Trailing‑stop while a long position is open.
 	the position.
 */
 func TestVolScaled_TrailingStop(t *testing.T) {
-	vp, exec := buildVolScaled(t)
-
-	// Enable trailing stop (2 %).
-	vp.Cfg.TrailingPct = 0.02
+	vs, exec := buildVolScaled(t)
+	vs.Cfg.TrailingPct = 0.02 // 2 %
 
 	// ---- Phase 1 – long entry (upward ramp) ----
 	var up []candle
@@ -160,29 +103,25 @@ func TestVolScaled_TrailingStop(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsVolScaledPos(t, vp, up)
+	feedBars(t, vs, up)
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Side != types.Buy {
 		t.Fatalf("expected initial BUY order, got %+v", exec.Orders())
 	}
-	entryPrice := exec.Orders()[0].Price
+	entry := exec.Orders()[0].Price
 
-	// ---- Phase 2 – price climbs past trailing level ----
-	trailingLevel := entryPrice * 1.02
-	high := trailingLevel + 0.5
-	low := trailingLevel - 0.5
-	close := trailingLevel + 0.1
-	feedBarsVolScaledPos(t, vp, []candle{{high, low, close, 1200}})
+	// ---- Phase 2 – price crosses trailing level (entry * 1.02) ----
+	trail := entry * 1.02
+	vs.ProcessBar(trail+0.5, trail-0.5, trail+0.1, 1200)
 
 	if len(exec.Orders()) != 2 {
 		t.Fatalf("expected trailing‑stop close order, got %d (orders: %+v)", len(exec.Orders()), exec.Orders())
 	}
-	closeOrder := exec.Orders()[1]
-	if closeOrder.Side != types.Sell {
-		t.Fatalf("expected SELL to close trailing stop, got %s", closeOrder.Side)
+	if exec.Orders()[1].Side != types.Sell {
+		t.Fatalf("expected SELL to close trailing stop, got %s", exec.Orders()[1].Side)
 	}
-	if closeOrder.Price < trailingLevel {
-		t.Fatalf("trailing‑stop price %f is below expected %f", closeOrder.Price, trailingLevel)
+	if exec.Orders()[1].Price < trail {
+		t.Fatalf("trailing‑stop price %f below expected %f", exec.Orders()[1].Price, trail)
 	}
 }
 
@@ -194,10 +133,8 @@ The strategy uses `TakeProfitPct` as an ATR‑multiple.  We set it to 2.0;
 with an ATSO value ≈2 the TP level becomes `entry + 2*ATR`.
 */
 func TestVolScaled_TakeProfit(t *testing.T) {
-	vp, exec := buildVolScaled(t)
-
-	// Enable TP (ATR‑multiple = 2).
-	vp.Cfg.TakeProfitPct = 2.0
+	vs, exec := buildVolScaled(t)
+	vs.Cfg.TakeProfitPct = 2.0 // ATR‑multiple TP
 
 	// ---- Phase 1 – long entry (upward ramp) ----
 	var up []candle
@@ -210,31 +147,25 @@ func TestVolScaled_TakeProfit(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsVolScaledPos(t, vp, up)
+	feedBars(t, vs, up)
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Side != types.Buy {
 		t.Fatalf("expected initial BUY order, got %+v", exec.Orders())
 	}
-	entryPrice := exec.Orders()[0].Price
+	entry := exec.Orders()[0].Price
 
-	// ---- Phase 2 – price reaches TP (entry + 2*ATR) ----
-	// For a smooth upward ramp the ATSO value settles around 2.
-	// TP = entry + 2*2 = entry + 4.
-	tpLevel := entryPrice + 4.0
-	high := tpLevel + 0.5
-	low := tpLevel - 0.5
-	close := tpLevel + 0.1
-	feedBarsVolScaledPos(t, vp, []candle{{high, low, close, 1300}})
+	// TP = entry + 2*ATR (ATSO≈2 for this series)
+	tp := entry + 4.0
+	vs.ProcessBar(tp+0.5, tp-0.5, tp+0.1, 1300)
 
 	if len(exec.Orders()) != 2 {
 		t.Fatalf("expected TP close order, got %d (orders: %+v)", len(exec.Orders()), exec.Orders())
 	}
-	tpOrder := exec.Orders()[1]
-	if tpOrder.Side != types.Sell {
-		t.Fatalf("expected SELL to close TP, got %s", tpOrder.Side)
+	if exec.Orders()[1].Side != types.Sell {
+		t.Fatalf("expected SELL to close TP, got %s", exec.Orders()[1].Side)
 	}
-	if tpOrder.Price < tpLevel {
-		t.Fatalf("TP price %f is below expected %f", tpOrder.Price, tpLevel)
+	if exec.Orders()[1].Price < tp {
+		t.Fatalf("TP price %f below expected %f", exec.Orders()[1].Price, tp)
 	}
 }
 
@@ -245,10 +176,10 @@ Test 5 – Opposite‑side flip (short after long).
 1️⃣ Open a long (upward ramp).
 2️⃣ Feed a bearish‑crossover series; the strategy should first close
 
-	the long (SELL) and then open a short (SELL).
+	the long (SELL) and then open a new short (SELL).
 */
 func TestVolScaled_OppositeSideFlip(t *testing.T) {
-	vp, exec := buildVolScaled(t)
+	vs, exec := buildVolScaled(t)
 
 	// ---- Phase 1 – long entry (upward ramp) ----
 	var up []candle
@@ -261,7 +192,7 @@ func TestVolScaled_OppositeSideFlip(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsVolScaledPos(t, vp, up)
+	feedBars(t, vs, up)
 
 	if len(exec.Orders()) != 1 || exec.Orders()[0].Side != types.Buy {
 		t.Fatalf("expected initial BUY order, got %+v", exec.Orders())
@@ -279,7 +210,7 @@ func TestVolScaled_OppositeSideFlip(t *testing.T) {
 			volume: 1000,
 		})
 	}
-	feedBarsVolScaledPos(t, vp, down)
+	feedBars(t, vs, down)
 
 	/*
 	   Expected order flow:
