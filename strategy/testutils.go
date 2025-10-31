@@ -34,14 +34,21 @@ is *always* true and the “overbought” check (`val >= RSIOverbought`) is
 actual indicator values.
 -----------------------------------------------------------------------
 */
+// returns a StrategyConfig whose thresholds are *valid*
+// (overbought > oversold) but still make the *value* checks always true.
+// We achieve that by putting the overbought far above any realistic value
+// and the oversold far below any realistic value.
 func buildConfig() config.StrategyConfig {
 	return config.StrategyConfig{
-		// Inverted thresholds – oversold condition always true, overbought
-		// condition always true.
-		RSIOverbought:     -1e9,
-		RSIOversold:       1e9,
-		MFIOverbought:     -1e9,
-		MFIOversold:       1e9,
+		// Overbought is a huge positive number, oversold a huge negative.
+		// Any realistic RSI/MFI value (0‑100) will satisfy:
+		//   val <= Oversold   → always false (so we never block a long)
+		//   val >= Overbought → always false (so we never block a short)
+		// The validator only cares that Overbought > Oversold, which is true.
+		RSIOverbought:     1e9,  // far above any possible RSI
+		RSIOversold:       -1e9, // far below any possible RSI
+		MFIOverbought:     1e9,
+		MFIOversold:       -1e9,
 		VWAOStrongTrend:   1e9, // not used by most strategies
 		HMAPeriod:         9,
 		ATSEMAperiod:      5,
@@ -219,7 +226,7 @@ func buildMultiTF(t *testing.T, fastSec, slowSec int) (*MultiTF, *testutils.Mock
 func buildRiskParity(t *testing.T,
 	symbols []string, topK, intervalBars int) (*RiskParityRotation, *testutils.MockExecutor) {
 
-	cfg := buildConfig()
+	cfg := buildConfig() // <-- use the corrected config
 	mockExec := testutils.NewMockExecutor(10_000)
 	mockLog := testutils.NewMockLogger()
 

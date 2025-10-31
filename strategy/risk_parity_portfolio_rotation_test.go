@@ -116,7 +116,14 @@ func TestRiskParity_ClosesAllWhenNoStrength(t *testing.T) {
 	aaaQty := exec.Orders()[0].Qty
 
 	/* ---------- Interval 2 – flat bars for both ---------- */
-	flat := []candle{{high: 101, low: 99, close: 100, volume: 1500}}
+	flat := []candle{
+		{
+			high:   100.1,
+			low:    99.9,
+			close:  100.0,
+			volume: 1500,
+		},
+	}
 	// Feed flat bar to both symbols.
 	rp.ProcessBar("AAA", flat[0].high, flat[0].low, flat[0].close, flat[0].volume)
 	rp.ProcessBar("BBB", flat[0].high, flat[0].low, flat[0].close, flat[0].volume)

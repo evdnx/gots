@@ -157,9 +157,9 @@ func TestHybridTrendMeanReversion_RevertOppositeEntry(t *testing.T) {
 	/* -------- Phase C – overbought signal → opposite short -------- */
 	over := []candle{
 		{
-			high:   200,
+			high:   210, // big swing → ATSO ≈ (high‑low)/2 ≈ 10
 			low:    190,
-			close:  195, // pushes RSI/MFI over their overbought levels
+			close:  200,
 			volume: 1500,
 		},
 	}
