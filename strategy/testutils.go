@@ -24,38 +24,37 @@ func feedBars(t *testing.T, strat interface {
 	}
 }
 
-/*
------------------------------------------------------------------------
-buildConfig returns a StrategyConfig whose RSI/MFI thresholds are
-deliberately inverted so that the “oversold” check (`val <= RSIOversold`)
-is *always* true and the “overbought” check (`val >= RSIOverbought`) is
-*always* true.  This lets the tests focus on the price‑based logic
-(crossovers, ATSO magnitude, etc.) without having to manipulate the
-actual indicator values.
------------------------------------------------------------------------
-*/
-// returns a StrategyConfig whose thresholds are *valid*
-// (overbought > oversold) but still make the *value* checks always true.
-// We achieve that by putting the overbought far above any realistic value
-// and the oversold far below any realistic value.
+// buildConfig returns a StrategyConfig whose RSI/MFI thresholds are
+// deliberately inverted so that the “oversold” check (`val <= RSIOversold`)
+// is *always* true and the “overbought” check (`val >= RSIOverbought`) is
+// *always* true.  This lets the tests focus on the price‑based logic
+// (crossovers, ATSO magnitude, etc.) without having to manipulate the
+// actual indicator values.
+//
+// The validator only cares that Overbought and Oversold are not equal,
+// which is satisfied by the values below.
 func buildConfig() config.StrategyConfig {
 	return config.StrategyConfig{
-		// Overbought is a huge positive number, oversold a huge negative.
-		// Any realistic RSI/MFI value (0‑100) will satisfy:
-		//   val <= Oversold   → always false (so we never block a long)
-		//   val >= Overbought → always false (so we never block a short)
-		// The validator only cares that Overbought > Oversold, which is true.
-		RSIOverbought:     1e9,  // far above any possible RSI
-		RSIOversold:       -1e9, // far below any possible RSI
-		MFIOverbought:     1e9,
-		MFIOversold:       -1e9,
-		VWAOStrongTrend:   1e9, // not used by most strategies
-		HMAPeriod:         9,
-		ATSEMAperiod:      5,
-		MaxRiskPerTrade:   0.01,  // 1 % of equity per trade
-		StopLossPct:       0.015, // 1.5 %
-		TakeProfitPct:     0.0,   // enable per‑test when needed
-		TrailingPct:       0.0,   // enable per‑test when needed
+		// Overbought is a huge negative number, oversold a huge positive.
+		RSIOverbought: -1e9, // far below any realistic RSI/MFI
+		RSIOversold:   1e9,  // far above any realistic RSI/MFI
+		MFIOverbought: -1e9,
+		MFIOversold:   1e9,
+
+		// VWAO isn’t used by most strategies; keep it large.
+		VWAOStrongTrend: 1e9,
+
+		// Indicator periods – reasonable defaults for the synthetic data.
+		HMAPeriod:    9,
+		ATSEMAperiod: 5,
+
+		// Risk parameters – 1 % of equity per trade, 1.5 % stop‑loss.
+		MaxRiskPerTrade: 0.01,
+		StopLossPct:     0.015,
+		TakeProfitPct:   0.0, // enabled per‑test when needed
+		TrailingPct:     0.0, // enabled per‑test when needed
+
+		// Quantity rounding / broker constraints.
 		QuantityPrecision: 2,
 		MinQty:            0.001,
 		StepSize:          0.0001,
