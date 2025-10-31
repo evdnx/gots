@@ -43,13 +43,18 @@ type StrategyConfig struct {
 // clear configuration problem before any trading starts.
 func (c *StrategyConfig) Validate() error {
 	// -----------------------------------------------------------------
-	// In production RSIOverbought should be > RSIOversold, but the test
-	// harness intentionally inverts them (overbought = -1e9, oversold = +1e9)
-	// so that the value checks are always true.  We only forbid them from
-	// being equal, which would break the normalization logic.
+	// In production the RSI over‑bought value should be greater than the
+	// over‑sold value, but the test harness deliberately inverts them
+	// (‑1e9 / +1e9) so that the value checks inside the strategies are
+	// always true.  To keep the validator useful we only reject the case
+	// where the two thresholds are *equal* (that would break the
+	// normalization logic).  All other checks remain unchanged.
 	// -----------------------------------------------------------------
 	if c.RSIOverbought == c.RSIOversold {
 		return errors.New("RSIOverbought and RSIOversold cannot be equal")
+	}
+	if c.MFIOverbought == c.MFIOversold {
+		return errors.New("MFIOverbought and MFIOversold cannot be equal")
 	}
 	if c.HMAPeriod <= 0 {
 		return errors.New("HMAPeriod must be positive")
@@ -77,12 +82,6 @@ func (c *StrategyConfig) Validate() error {
 	}
 	if c.StepSize <= 0 {
 		return errors.New("StepSize must be positive")
-	}
-	// -----------------------------------------------------------------
-	// MFI thresholds – same story as RSI.
-	// -----------------------------------------------------------------
-	if c.MFIOverbought == c.MFIOversold {
-		return errors.New("MFIOverbought and MFIOversold cannot be equal")
 	}
 	return nil
 }

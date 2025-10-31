@@ -23,11 +23,11 @@ func NewTrendComposite(symbol string, cfg config.StrategyConfig,
 
 	suiteFactory := func() (*goti.IndicatorSuite, error) {
 		ic := goti.DefaultConfig()
-		/* ic.RSIOverbought = cfg.RSIOverbought
-		ic.RSIOversold = cfg.RSIOversold
-		ic.MFIOverbought = cfg.MFIOverbought
-		ic.MFIOversold = cfg.MFIOversold
-		ic.VWAOStrongTrend = cfg.VWAOStrongTrend */
+		ic.RSIOverbought = 70
+		ic.RSIOversold = 30
+		ic.MFIOverbought = 80
+		ic.MFIOversold = 20
+		ic.VWAOStrongTrend = 70
 		ic.ATSEMAperiod = cfg.ATSEMAperiod
 		return goti.NewIndicatorSuiteWithConfig(ic)
 	}

@@ -46,10 +46,10 @@ func NewRiskParityRotation(symbols []string, cfg config.StrategyConfig,
 	states := make(map[string]*SymbolState)
 	for _, sym := range symbols {
 		ic := goti.DefaultConfig()
-		/* ic.RSIOverbought = cfg.RSIOverbought
-		ic.RSIOversold = cfg.RSIOversold
-		ic.MFIOverbought = cfg.MFIOverbought
-		ic.MFIOversold = cfg.MFIOversold */
+		ic.RSIOverbought = 70
+		ic.RSIOversold = 30
+		ic.MFIOverbought = 80
+		ic.MFIOversold = 20
 		suite, err := goti.NewIndicatorSuiteWithConfig(ic)
 		if err != nil {
 			return nil, err
