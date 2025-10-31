@@ -61,14 +61,6 @@ func buildConfig() config.StrategyConfig {
 	}
 }
 
-/*
------------------------------------------------------------------------
-Generic helper that builds a strategy with a real goti.IndicatorSuite,
-a mock executor, and a mock logger.  The concrete constructor is passed
-in as a closure; it receives (symbol, cfg, exec, log) and returns the
-concrete strategy (which implements ProcessBar).
------------------------------------------------------------------------
-*/
 func buildStrategy(t *testing.T,
 	constructor func(symbol string, cfg config.StrategyConfig,
 		exec executor.Executor, log logger.Logger) interface {
@@ -81,24 +73,13 @@ func buildStrategy(t *testing.T,
 	mockExec := testutils.NewMockExecutor(10_000) // $10 k start equity
 	mockLog := testutils.NewMockLogger()
 
-	// Suite factory – returns a *real* goti suite.
-	suiteFactory := func() (*goti.IndicatorSuite, error) {
-		ic := goti.DefaultConfig()
-		ic.RSIOverbought = cfg.RSIOverbought
-		ic.RSIOversold = 30
-		ic.MFIOverbought = 80
-		ic.MFIOversold = 20
-		ic.VWAOStrongTrend = 70
-		ic.ATSEMAperiod = cfg.ATSEMAperiod
-		return goti.NewIndicatorSuiteWithConfig(ic)
+	// Validate the config (this uses the relaxed Validate we added).
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validation failed: %v", err)
 	}
 
 	// Most strategy constructors accept (symbol, cfg, exec, log) – the
 	// concrete type varies, so we use a type‑assertion after construction.
-	_, err := NewBaseStrategy("TEST", cfg, mockExec, suiteFactory, mockLog)
-	if err != nil {
-		t.Fatalf("NewBaseStrategy failed: %v", err)
-	}
 	strat := constructor("TEST", cfg, mockExec, mockLog)
 	return strat, mockExec
 }

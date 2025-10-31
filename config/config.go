@@ -45,10 +45,10 @@ func (c *StrategyConfig) Validate() error {
 	// -----------------------------------------------------------------
 	// In production the RSI over‑bought value should be greater than the
 	// over‑sold value, but the test harness deliberately inverts them
-	// (‑1e9 / +1e9) so that the value checks inside the strategies are
-	// always true.  To keep the validator useful we only reject the case
-	// where the two thresholds are *equal* (that would break the
-	// normalization logic).  All other checks remain unchanged.
+	// (‑1e9 / +1e9) so the value checks inside the strategies are always
+	// true.  To keep the validator useful we only reject the case where
+	// the two thresholds are *equal* (that would break the normalization
+	// logic).  All other checks remain unchanged.
 	// -----------------------------------------------------------------
 	if c.RSIOverbought == c.RSIOversold {
 		return errors.New("RSIOverbought and RSIOversold cannot be equal")
