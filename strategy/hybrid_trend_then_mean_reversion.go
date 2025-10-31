@@ -32,10 +32,10 @@ func NewHybridTrendMeanReversion(symbol string, cfg config.StrategyConfig,
 
 	suiteFactory := func() (*goti.IndicatorSuite, error) {
 		ic := goti.DefaultConfig()
-		ic.RSIOverbought = cfg.RSIOverbought
+		/* ic.RSIOverbought = cfg.RSIOverbought
 		ic.RSIOversold = cfg.RSIOversold
 		ic.MFIOverbought = cfg.MFIOverbought
-		ic.MFIOversold = cfg.MFIOversold
+		ic.MFIOversold = cfg.MFIOversold */
 		return goti.NewIndicatorSuiteWithConfig(ic)
 	}
 	base, err := NewBaseStrategy(symbol, cfg, exec, suiteFactory, log)

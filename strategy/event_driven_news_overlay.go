@@ -27,10 +27,10 @@ func NewEventDriven(symbol string, cfg config.StrategyConfig,
 
 	suiteFactory := func() (*goti.IndicatorSuite, error) {
 		ic := goti.DefaultConfig()
-		ic.RSIOverbought = cfg.RSIOverbought
+		/* ic.RSIOverbought = cfg.RSIOverbought
 		ic.RSIOversold = cfg.RSIOversold
 		ic.MFIOverbought = cfg.MFIOverbought
-		ic.MFIOversold = cfg.MFIOversold
+		ic.MFIOversold = cfg.MFIOversold */
 		ic.ATSEMAperiod = cfg.ATSEMAperiod
 		return goti.NewIndicatorSuiteWithConfig(ic)
 	}

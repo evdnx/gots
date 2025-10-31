@@ -21,10 +21,10 @@ func NewAdaptiveBandMR(symbol string, cfg config.StrategyConfig,
 	// Build suite with user‑provided thresholds.
 	suiteFactory := func() (*goti.IndicatorSuite, error) {
 		ic := goti.DefaultConfig()
-		ic.RSIOverbought = cfg.RSIOverbought
-		ic.RSIOversold = cfg.RSIOversold
-		ic.MFIOverbought = cfg.MFIOverbought
-		ic.MFIOversold = cfg.MFIOversold
+		//ic.RSIOverbought = cfg.RSIOverbought
+		//ic.RSIOversold = cfg.RSIOversold
+		//ic.MFIOverbought = cfg.MFIOverbought
+		//ic.MFIOversold = cfg.MFIOversold
 		return goti.NewIndicatorSuiteWithConfig(ic)
 	}
 
