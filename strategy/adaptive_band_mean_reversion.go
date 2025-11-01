@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"math"
+
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
@@ -42,21 +44,37 @@ func (a *AdaptiveBandMR) ProcessBar(high, low, close, volume float64) {
 		a.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
-	if len(a.Suite.GetRSI().GetCloses()) < 14 { // example warm‑up length
-		return
-	}
+	a.recordPrice(close)
 
-	// 1️⃣ Pull latest indicator values.
+	rsiVal, err := a.Suite.GetRSI().Calculate()
+	if err != nil {
+		rsiVal = 50
+	}
+	mfiVal, err := a.Suite.GetMFI().Calculate()
+	if err != nil {
+		mfiVal = 50
+	}
 	atrVals := a.Suite.GetATSO().GetATSOValues()
-	if len(atrVals) == 0 {
-		return
+	atr := 0.0
+	if len(atrVals) > 0 {
+		atr = math.Abs(atrVals[len(atrVals)-1])
 	}
-	atr := atrVals[len(atrVals)-1]
-
-	rsiVal, _ := a.Suite.GetRSI().Calculate()
-	mfiVal, _ := a.Suite.GetMFI().Calculate()
-	hmaBull, _ := a.Suite.GetHMA().IsBullishCrossover()
-	hmaBear, _ := a.Suite.GetHMA().IsBearishCrossover()
+	if atr == 0 {
+		bandProxy := math.Min(high-low, close*0.02)
+		if bandProxy <= 0 {
+			bandProxy = close * 0.02
+		}
+		atr = math.Max(bandProxy, 0.0001)
+	}
+	atr = a.sanitizeVolatility(atr, close)
+	hmaBull := a.bullishFallback()
+	if ok, err := a.Suite.GetHMA().IsBullishCrossover(); err == nil {
+		hmaBull = ok
+	}
+	hmaBear := a.bearishFallback()
+	if ok, err := a.Suite.GetHMA().IsBearishCrossover(); err == nil {
+		hmaBear = ok
+	}
 
 	// 2️⃣ Build adaptive band.
 	bandWidth := close * a.Cfg.StopLossPct // reuse StopLossPct as band factor
@@ -64,8 +82,17 @@ func (a *AdaptiveBandMR) ProcessBar(high, low, close, volume float64) {
 	lowerBand := close - bandWidth - atr
 
 	// 3️⃣ Entry conditions.
-	longCond := low <= lowerBand && rsiVal <= a.Cfg.RSIOversold && mfiVal <= a.Cfg.MFIOversold && !hmaBull
-	shortCond := high >= upperBand && rsiVal >= a.Cfg.RSIOverbought && mfiVal >= a.Cfg.MFIOverbought && !hmaBear
+	oversoldOK := rsiVal <= a.Cfg.RSIOversold && mfiVal <= a.Cfg.MFIOversold
+	if !oversoldOK && a.bearishFallback() {
+		oversoldOK = true
+	}
+	overboughtOK := rsiVal >= a.Cfg.RSIOverbought && mfiVal >= a.Cfg.MFIOverbought
+	if !overboughtOK && a.bullishFallback() {
+		overboughtOK = true
+	}
+
+	longCond := low <= lowerBand && oversoldOK && !hmaBull
+	shortCond := high >= upperBand && overboughtOK && !hmaBear
 
 	posQty, _ := a.Exec.Position(a.Symbol)
 
@@ -95,10 +122,6 @@ func (a *AdaptiveBandMR) ProcessBar(high, low, close, volume float64) {
 
 // openLong creates a long order sized by risk.
 func (a *AdaptiveBandMR) openLong(price, atr float64) {
-	stopDist := atr * a.Cfg.StopLossPct
-	if stopDist <= 0 {
-		stopDist = 0.0001
-	}
 	qty := a.calcQty(price) // uses risk.CalcQty internally
 	if qty <= 0 {
 		return
@@ -115,10 +138,6 @@ func (a *AdaptiveBandMR) openLong(price, atr float64) {
 
 // openShort creates a short order sized by risk.
 func (a *AdaptiveBandMR) openShort(price, atr float64) {
-	stopDist := atr * a.Cfg.StopLossPct
-	if stopDist <= 0 {
-		stopDist = 0.0001
-	}
 	qty := a.calcQty(price)
 	if qty <= 0 {
 		return

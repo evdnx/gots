@@ -145,7 +145,7 @@ func buildEventDriven(t *testing.T, eventThreshold float64, maxHoldingBars int) 
 
 	suiteFactory := func() (*goti.IndicatorSuite, error) {
 		ic := goti.DefaultConfig()
-		ic.RSIOverbought = cfg.RSIOverbought
+		ic.RSIOverbought = 70
 		ic.RSIOversold = 30
 		ic.MFIOverbought = 80
 		ic.MFIOversold = 20

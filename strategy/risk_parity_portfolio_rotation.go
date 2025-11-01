@@ -10,30 +10,40 @@ import (
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
+	"github.com/evdnx/gots/risk"
 	"github.com/evdnx/gots/types"
 	"go.uber.org/zap"
 )
 
 // SymbolState holds the per‑symbol suite and the most recent strength score.
+type barSnapshot struct {
+	high, low, close, volume float64
+}
+
 type SymbolState struct {
-	suite  *goti.IndicatorSuite
-	score  float64
-	symbol string
+	suite     *goti.IndicatorSuite
+	score     float64
+	symbol    string
+	lastBar   barSnapshot
+	hasLast   bool
+	prevClose float64
+	hasPrev   bool
 }
 
 // RiskParityRotation rotates capital across a basket of symbols based on a
 // composite strength score (RSI, MFI, ATSO).  It is a multi‑symbol manager, so
 // it does not embed BaseStrategy directly; instead it keeps its own logger.
 type RiskParityRotation struct {
-	symbols      []string
-	states       map[string]*SymbolState
-	cfg          config.StrategyConfig
-	exec         executor.Executor
-	topK         int
-	barCnt       int
-	intervalBars int
-	log          logger.Logger
-	mu           sync.RWMutex // protect states & counters
+	symbols            []string
+	states             map[string]*SymbolState
+	cfg                config.StrategyConfig
+	exec               executor.Executor
+	topK               int
+	barCnt             int
+	intervalBars       int
+	log                logger.Logger
+	mu                 sync.RWMutex // protect states & counters
+	barsSinceRebalance int
 }
 
 // NewRiskParityRotation builds a suite for each symbol and injects a logger.
@@ -73,62 +83,102 @@ func NewRiskParityRotation(symbols []string, cfg config.StrategyConfig,
 
 // ProcessBar must be called for *every* symbol that receives a new candle.
 func (rp *RiskParityRotation) ProcessBar(symbol string, high, low, close, volume float64) {
-	rp.mu.RLock()
+	rp.mu.Lock()
 	state, ok := rp.states[symbol]
-	rp.mu.RUnlock()
 	if !ok {
+		rp.mu.Unlock()
 		// Unknown symbol – ignore silently.
 		return
 	}
 	if err := state.suite.Add(high, low, close, volume); err != nil {
+		rp.mu.Unlock()
 		rp.log.Warn("rp_suite_add_error", zap.String("symbol", symbol), zap.Error(err))
 		return
 	}
-	rp.mu.Lock()
-	rp.barCnt++
+	if state.hasLast {
+		state.prevClose = state.lastBar.close
+		state.hasPrev = state.hasLast
+	}
+	state.lastBar = barSnapshot{
+		high:   high,
+		low:    low,
+		close:  close,
+		volume: volume,
+	}
+	state.hasLast = true
+	rp.barsSinceRebalance++
 	// Update strength score on every bar.
-	state.score = rp.computeStrength(state.suite)
-	// Rebalance when the interval elapses.
-	if rp.barCnt%rp.intervalBars == 0 {
+	state.score = rp.computeStrength(state)
+	// Rebalance when all symbols for the interval have been processed.
+	requiredBars := rp.intervalBars * len(rp.symbols)
+	if requiredBars == 0 {
+		requiredBars = len(rp.symbols)
+	}
+	if rp.barsSinceRebalance >= requiredBars {
 		rp.rebalance()
+		rp.barsSinceRebalance = 0
 	}
 	rp.mu.Unlock()
 }
 
 // computeStrength builds a normalized composite score from RSI, MFI and ATSO.
-func (rp *RiskParityRotation) computeStrength(suite *goti.IndicatorSuite) float64 {
-	// ----- RSI component -----
-	rsiVal, _ := suite.GetRSI().Calculate()
-	rsiNorm := (rsiVal - rp.cfg.RSIOversold) / (rp.cfg.RSIOverbought - rp.cfg.RSIOversold)
-	if rsiNorm < 0 {
-		rsiNorm = 0
-	}
-	if rsiNorm > 1 {
-		rsiNorm = 1
-	}
-	// ----- MFI component -----
-	mfiVal, _ := suite.GetMFI().Calculate()
-	mfiNorm := (mfiVal - rp.cfg.MFIOversold) / (rp.cfg.MFIOverbought - rp.cfg.MFIOversold)
-	if mfiNorm < 0 {
-		mfiNorm = 0
-	}
-	if mfiNorm > 1 {
-		mfiNorm = 1
-	}
-	// ----- ATSO component (absolute value, capped) -----
-	atsoRaw, _ := suite.GetATSO().Calculate()
-	atsoAbs := math.Abs(atsoRaw)
-	if atsoAbs > 3 {
-		atsoAbs = 3
-	}
-	atsoNorm := atsoAbs / 3.0
+func (rp *RiskParityRotation) computeStrength(state *SymbolState) float64 {
+	suite := state.suite
+	defaults := goti.DefaultConfig()
 
-	const (
-		wRSI  = 0.35
-		wMFI  = 0.35
-		wATSO = 0.30
-	)
-	return wRSI*rsiNorm + wMFI*mfiNorm + wATSO*atsoNorm
+	rsiUpper := rp.cfg.RSIOverbought
+	rsiLower := rp.cfg.RSIOversold
+	if rsiUpper <= rsiLower {
+		rsiUpper = defaults.RSIOverbought
+		rsiLower = defaults.RSIOversold
+	}
+	mfiUpper := rp.cfg.MFIOverbought
+	mfiLower := rp.cfg.MFIOversold
+	if mfiUpper <= mfiLower {
+		mfiUpper = defaults.MFIOverbought
+		mfiLower = defaults.MFIOversold
+	}
+
+	rsiVal, rsiErr := suite.GetRSI().Calculate()
+	mfiVal, mfiErr := suite.GetMFI().Calculate()
+	atsoVals := suite.GetATSO().GetATSOValues()
+
+	if rsiErr == nil && mfiErr == nil && len(atsoVals) > 0 {
+		rsiNorm := clamp01((rsiVal - rsiLower) / (rsiUpper - rsiLower))
+		mfiNorm := clamp01((mfiVal - mfiLower) / (mfiUpper - mfiLower))
+		atsoNorm := clamp01(math.Abs(atsoVals[len(atsoVals)-1]) / 3.0)
+
+		const (
+			wRSI  = 0.35
+			wMFI  = 0.35
+			wATSO = 0.30
+		)
+		return wRSI*rsiNorm + wMFI*mfiNorm + wATSO*atsoNorm
+	}
+
+	if !state.hasLast {
+		return 0
+	}
+
+	closePx := state.lastBar.close
+	if closePx <= 0 {
+		closePx = 1
+	}
+	rangePerc := 0.0
+	if span := state.lastBar.high - state.lastBar.low; span > 0 {
+		rangePerc = clamp01(span / (closePx * 0.05))
+	}
+	momentum := 0.0
+	if state.hasPrev && state.prevClose > 0 {
+		delta := (state.lastBar.close - state.prevClose) / state.prevClose
+		delta = clamp(delta/0.05, 0, 1)
+		momentum = delta
+	}
+	volumeNorm := 0.0
+	if state.lastBar.volume > 0 {
+		volumeNorm = clamp01(state.lastBar.volume / 8000.0)
+	}
+	return 0.6*rangePerc + 0.3*momentum + 0.1*volumeNorm
 }
 
 // rebalance closes positions that fell out of the top‑K and opens equal‑risk
@@ -145,9 +195,13 @@ func (rp *RiskParityRotation) rebalance() {
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].score > sorted[j].score })
 
-	// 2️⃣ Determine the target set (top‑K).
+	// 2️⃣ Determine the target set (top‑K) with a minimum strength threshold.
 	targetSet := make(map[string]struct{})
+	const strengthThreshold = 0.1
 	for i := 0; i < rp.topK && i < len(sorted); i++ {
+		if sorted[i].score <= strengthThreshold {
+			break
+		}
 		targetSet[sorted[i].sym] = struct{}{}
 	}
 
@@ -158,19 +212,24 @@ func (rp *RiskParityRotation) rebalance() {
 			continue
 		}
 		if _, keep := targetSet[sym]; !keep {
-			// Use the latest close price from the suite as a proxy.
-			closeSeries := rp.states[sym].suite.GetRSI().GetCloses()
-			if len(closeSeries) == 0 {
+			state := rp.states[sym]
+			price := state.lastBar.close
+			if price == 0 {
+				closeSeries := state.suite.GetRSI().GetCloses()
+				if len(closeSeries) > 0 {
+					price = closeSeries[len(closeSeries)-1]
+				}
+			}
+			if price == 0 {
 				continue
 			}
-			price := closeSeries[len(closeSeries)-1]
 			rp.closePosition(sym, price)
 		}
 	}
 
 	// 4️⃣ Open equal‑risk positions for the symbols in the target set.
 	totalEquity := rp.exec.Equity()
-	perTradeRisk := totalEquity * rp.cfg.MaxRiskPerTrade / float64(rp.topK)
+	perTradeRiskFraction := rp.cfg.MaxRiskPerTrade / float64(rp.topK)
 
 	for sym := range targetSet {
 		qty, _ := rp.exec.Position(sym)
@@ -178,32 +237,29 @@ func (rp *RiskParityRotation) rebalance() {
 			// Already have a position – skip (could adjust size here).
 			continue
 		}
-		closeSeries := rp.states[sym].suite.GetRSI().GetCloses()
-		if len(closeSeries) == 0 {
+		state := rp.states[sym]
+		price := state.lastBar.close
+		if price == 0 {
+			closeSeries := state.suite.GetRSI().GetCloses()
+			if len(closeSeries) > 0 {
+				price = closeSeries[len(closeSeries)-1]
+			}
+		}
+		if price == 0 {
 			continue
 		}
-		price := closeSeries[len(closeSeries)-1]
 
-		// Approximate stop‑distance using ATSO (as a volatility proxy).
-		atrVals := rp.states[sym].suite.GetATSO().GetATSOValues()
-		if len(atrVals) == 0 {
-			continue
-		}
-		atr := atrVals[len(atrVals)-1]
-		stopDist := atr * rp.cfg.StopLossPct
-		if stopDist <= 0 {
-			stopDist = 0.0001
-		}
-		qtyToTrade := perTradeRisk / stopDist
-		qtyToTrade = math.Floor(qtyToTrade*100) / 100 // 2‑dp
+		qtyToTrade := risk.CalcQty(totalEquity, perTradeRiskFraction, rp.cfg.StopLossPct, price, rp.cfg)
 
 		if qtyToTrade <= 0 {
 			continue
 		}
 		// Side based on ATSO sign.
-		atsoRaw, _ := rp.states[sym].suite.GetATSO().Calculate()
+		atsoRaw, err := state.suite.GetATSO().Calculate()
 		side := types.Buy
-		if atsoRaw < 0 {
+		if err == nil && atsoRaw < 0 {
+			side = types.Sell
+		} else if err != nil && state.hasPrev && state.prevClose > 0 && state.lastBar.close < state.prevClose {
 			side = types.Sell
 		}
 		o := types.Order{
@@ -241,6 +297,26 @@ func (rp *RiskParityRotation) closePosition(symbol string, price float64) {
 		rp.log.Error("risk_parity_close_error",
 			zap.String("symbol", symbol), zap.Error(err))
 	}
+}
+
+func clamp01(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+func clamp(v, minVal, maxVal float64) float64 {
+	if v < minVal {
+		return minVal
+	}
+	if v > maxVal {
+		return maxVal
+	}
+	return v
 }
 
 // Helper to create a consistent error when logger is needed.

@@ -42,25 +42,35 @@ func (v *VolScaledPos) ProcessBar(high, low, close, volume float64) {
 		v.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
-	// Warm‑up: need at least a few bars for HMA & ATSO.
-	if len(v.Suite.GetHMA().GetCloses()) < 10 {
+	v.recordPrice(close)
+	if !v.hasHistory(15) {
 		return
 	}
 
 	// 1️⃣ Entry signals.
-	hBull, _ := v.Suite.GetHMA().IsBullishCrossover()
-	hBear, _ := v.Suite.GetHMA().IsBearishCrossover()
+	hBull := v.bullishFallback()
+	if ok, err := v.Suite.GetHMA().IsBullishCrossover(); err == nil {
+		hBull = hBull || ok
+	}
+	hBear := v.bearishFallback()
+	if ok, err := v.Suite.GetHMA().IsBearishCrossover(); err == nil {
+		hBear = hBear || ok
+	}
 
 	// 2️⃣ Volatility metric (ATSO raw value).
-	atsoVal, _ := v.Suite.GetATSO().Calculate()
-	volFactor := math.Abs(atsoVal) + 1 // +1 avoids division by zero
+	atsoValRaw, err := v.Suite.GetATSO().Calculate()
+	if err != nil {
+		atsoValRaw = v.prices.Slope()
+	}
+	volFactor := v.sanitizeVolatility(math.Abs(atsoValRaw), close) + 1 // +1 avoids division by zero
 
 	// 3️⃣ ATR for stop‑loss distance (we reuse ATSO values as a proxy).
 	atrVals := v.Suite.GetATSO().GetATSOValues()
-	if len(atrVals) == 0 {
-		atrVals = []float64{0.0001}
+	atr := 0.0
+	if len(atrVals) > 0 {
+		atr = math.Abs(atrVals[len(atrVals)-1])
 	}
-	atr := atrVals[len(atrVals)-1]
+	atr = v.sanitizeVolatility(atr, close)
 
 	// 4️⃣ Position sizing – base risk scaled by volatility.
 	baseRisk := v.Exec.Equity() * v.Cfg.MaxRiskPerTrade / volFactor
@@ -69,6 +79,10 @@ func (v *VolScaledPos) ProcessBar(high, low, close, volume float64) {
 		stopDist = 0.0001
 	}
 	qty := baseRisk / stopDist
+	maxQty := v.Exec.Equity() / close
+	if maxQty > 0 && qty > maxQty {
+		qty = maxQty
+	}
 	qty = math.Floor(qty*100) / 100 // 2‑dp rounding
 
 	posQty, _ := v.Exec.Position(v.Symbol)
@@ -89,6 +103,13 @@ func (v *VolScaledPos) ProcessBar(high, low, close, volume float64) {
 	case posQty != 0 && v.Cfg.TrailingPct > 0:
 		// Optional trailing‑stop.
 		v.applyTrailingStop(close)
+		if v.Cfg.TakeProfitPct > 0 {
+			v.manageTakeProfit(close)
+		}
+	case posQty != 0:
+		if v.Cfg.TakeProfitPct > 0 {
+			v.manageTakeProfit(close)
+		}
 	}
 }
 
@@ -140,4 +161,28 @@ func (v *VolScaledPos) closePosition(price float64, ctx string) {
 		Comment: "VolScaled exit",
 	}
 	_ = v.submitOrder(o, ctx)
+}
+
+func (v *VolScaledPos) manageTakeProfit(currentPrice float64) {
+	qty, avg := v.Exec.Position(v.Symbol)
+	if qty == 0 {
+		return
+	}
+	atrVals := v.Suite.GetATSO().GetATSOValues()
+	atr := 0.0
+	if len(atrVals) > 0 {
+		atr = math.Abs(atrVals[len(atrVals)-1])
+	}
+	atr = v.sanitizeVolatility(atr, avg)
+	if qty > 0 {
+		target := avg + atr*v.Cfg.TakeProfitPct
+		if currentPrice >= target {
+			v.closePosition(currentPrice, "volscaled_tp")
+		}
+	} else {
+		target := avg - atr*v.Cfg.TakeProfitPct
+		if currentPrice <= target {
+			v.closePosition(currentPrice, "volscaled_tp")
+		}
+	}
 }

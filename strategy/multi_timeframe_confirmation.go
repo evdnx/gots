@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"math"
+
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
@@ -12,10 +14,11 @@ import (
 // MultiTF confirms a signal on two time‑frames (fast & slow).
 type MultiTF struct {
 	*BaseStrategy
-	fastSuite *goti.IndicatorSuite
-	slowSuite *goti.IndicatorSuite
-	fastTFSec int
-	slowTFSec int
+	fastSuite  *goti.IndicatorSuite
+	slowSuite  *goti.IndicatorSuite
+	fastTFSec  int
+	slowTFSec  int
+	lastSignal int
 }
 
 // NewMultiTF builds two independent suites – one for each resolution.
@@ -46,12 +49,16 @@ func NewMultiTF(symbol string, cfg config.StrategyConfig,
 		slowSuite:    slow,
 		fastTFSec:    fastSec,
 		slowTFSec:    slowSec,
+		lastSignal:   0,
 	}, nil
 }
 
 // ProcessBar receives fast bars; the slow suite receives the same data
 // (it internally trims to its longer window).
 func (m *MultiTF) ProcessBar(high, low, close, volume float64) {
+	if err := m.Suite.Add(high, low, close, volume); err != nil {
+		m.Log.Warn("base_suite_add_error", zap.Error(err))
+	}
 	// Fast suite always receives the bar.
 	if err := m.fastSuite.Add(high, low, close, volume); err != nil {
 		m.Log.Warn("fast_suite_add_error", zap.Error(err))
@@ -60,20 +67,38 @@ func (m *MultiTF) ProcessBar(high, low, close, volume float64) {
 	if err := m.slowSuite.Add(high, low, close, volume); err != nil {
 		m.Log.Warn("slow_suite_add_error", zap.Error(err))
 	}
-
-	// Ensure both suites have enough history.
-	if len(m.fastSuite.GetHMA().GetCloses()) < 10 || len(m.slowSuite.GetHMA().GetCloses()) < 10 {
-		return // warm‑up
+	m.recordPrice(close)
+	if !m.hasHistory(15) {
+		return
 	}
 
 	// Check for aligned HMA crossovers.
-	fBull, _ := m.fastSuite.GetHMA().IsBullishCrossover()
-	fBear, _ := m.fastSuite.GetHMA().IsBearishCrossover()
-	sBull, _ := m.slowSuite.GetHMA().IsBullishCrossover()
-	sBear, _ := m.slowSuite.GetHMA().IsBearishCrossover()
+	fBull := m.bullishFallback()
+	if ok, err := m.fastSuite.GetHMA().IsBullishCrossover(); err == nil {
+		fBull = fBull || ok
+	}
+	fBear := m.bearishFallback()
+	if ok, err := m.fastSuite.GetHMA().IsBearishCrossover(); err == nil {
+		fBear = fBear || ok
+	}
+	sBull := m.bullishFallback()
+	if ok, err := m.slowSuite.GetHMA().IsBullishCrossover(); err == nil {
+		sBull = sBull || ok
+	}
+	sBear := m.bearishFallback()
+	if ok, err := m.slowSuite.GetHMA().IsBearishCrossover(); err == nil {
+		sBear = sBear || ok
+	}
 
-	longCond := fBull && sBull
-	shortCond := fBear && sBear
+	trendDir := m.prices.Trend()
+	longCond := trendDir > 0 && fBull && sBull
+	shortCond := trendDir < 0 && fBear && sBear
+	if longCond && m.lastSignal == 1 {
+		longCond = false
+	}
+	if shortCond && m.lastSignal == -1 {
+		shortCond = false
+	}
 
 	posQty, _ := m.Exec.Position(m.Symbol)
 
@@ -83,15 +108,28 @@ func (m *MultiTF) ProcessBar(high, low, close, volume float64) {
 			m.closePosition(close, "mtf_close_short")
 		}
 		m.openLong(close)
+		m.lastSignal = 1
 
 	case shortCond && posQty >= 0:
 		if posQty > 0 {
 			m.closePosition(close, "mtf_close_long")
 		}
 		m.openShort(close)
+		m.lastSignal = -1
 
 	case posQty != 0 && m.Cfg.TrailingPct > 0:
 		m.applyTrailingStop(close)
+		if m.Cfg.TakeProfitPct > 0 {
+			m.manageTakeProfit(close)
+		}
+	case posQty != 0:
+		if m.Cfg.TakeProfitPct > 0 {
+			m.manageTakeProfit(close)
+		}
+	default:
+		if !longCond && !shortCond {
+			m.lastSignal = 0
+		}
 	}
 }
 
@@ -124,4 +162,28 @@ func (m *MultiTF) openShort(price float64) {
 		Comment: "MultiTF entry short",
 	}
 	_ = m.submitOrder(o, "mtf_short")
+}
+
+func (m *MultiTF) manageTakeProfit(currentPrice float64) {
+	qty, avg := m.Exec.Position(m.Symbol)
+	if qty == 0 {
+		return
+	}
+	atrVals := m.Suite.GetATSO().GetATSOValues()
+	atr := 0.0
+	if len(atrVals) > 0 {
+		atr = math.Abs(atrVals[len(atrVals)-1])
+	}
+	atr = m.sanitizeVolatility(atr, currentPrice)
+	if qty > 0 {
+		target := avg + atr*m.Cfg.TakeProfitPct
+		if currentPrice >= target {
+			m.closePosition(currentPrice, "mtf_tp")
+		}
+	} else {
+		target := avg - atr*m.Cfg.TakeProfitPct
+		if currentPrice <= target {
+			m.closePosition(currentPrice, "mtf_tp")
+		}
+	}
 }

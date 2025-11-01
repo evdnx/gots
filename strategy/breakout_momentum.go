@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"math"
+
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
@@ -36,18 +38,30 @@ func (bm *BreakoutMomentum) ProcessBar(high, low, close, volume float64) {
 		bm.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
-
-	if len(bm.Suite.GetHMA().GetCloses()) < 10 {
-		return // warm‑up
+	bm.recordPrice(close)
+	if !bm.hasHistory(15) {
+		return
 	}
 
 	// 1️⃣ Gather signals.
-	hBull, _ := bm.Suite.GetHMA().IsBullishCrossover()
-	hBear, _ := bm.Suite.GetHMA().IsBearishCrossover()
-	vBull, _ := bm.Suite.GetVWAO().IsBullishCrossover()
-	vBear, _ := bm.Suite.GetVWAO().IsBearishCrossover()
-	atBull := bm.Suite.GetATSO().IsBullishCrossover()
-	atBear := bm.Suite.GetATSO().IsBearishCrossover()
+	hBull := bm.bullishFallback()
+	if ok, err := bm.Suite.GetHMA().IsBullishCrossover(); err == nil {
+		hBull = hBull || ok
+	}
+	hBear := bm.bearishFallback()
+	if ok, err := bm.Suite.GetHMA().IsBearishCrossover(); err == nil {
+		hBear = hBear || ok
+	}
+	vBull := bm.bullishFallback()
+	if ok, err := bm.Suite.GetVWAO().IsBullishCrossover(); err == nil {
+		vBull = vBull || ok
+	}
+	vBear := bm.bearishFallback()
+	if ok, err := bm.Suite.GetVWAO().IsBearishCrossover(); err == nil {
+		vBear = vBear || ok
+	}
+	atBull := bm.bullishFallback() || bm.Suite.GetATSO().IsBullishCrossover()
+	atBear := bm.bearishFallback() || bm.Suite.GetATSO().IsBearishCrossover()
 
 	longSignal := hBull && vBull && atBull
 	shortSignal := hBear && vBear && atBear
@@ -120,7 +134,7 @@ func (bm *BreakoutMomentum) manageTakeProfit(currentPrice float64) {
 	if len(atrVals) == 0 {
 		return
 	}
-	atr := atrVals[len(atrVals)-1]
+	atr := bm.sanitizeVolatility(math.Abs(atrVals[len(atrVals)-1]), avg)
 
 	if qty > 0 {
 		target := avg + atr*bm.Cfg.TakeProfitPct

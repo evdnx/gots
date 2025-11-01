@@ -18,6 +18,7 @@ type EventDriven struct {
 	eventThreshold float64 // absolute ATSO magnitude required to trigger
 	maxHoldingBars int
 	barSinceEntry  int
+	armed          bool
 }
 
 // NewEventDriven builds the suite and injects a logger.
@@ -50,7 +51,11 @@ func NewEventDriven(symbol string, cfg config.StrategyConfig,
 // SetEventActive toggles the external news flag.
 func (e *EventDriven) SetEventActive(active bool) {
 	e.eventActive = active
+	if active {
+		e.armed = true
+	}
 	if !active {
+		e.armed = false
 		if qty, _ := e.Exec.Position(e.Symbol); qty != 0 {
 			e.closePosition(e.lastClose(), "event_inactive_close")
 		}
@@ -63,8 +68,9 @@ func (e *EventDriven) ProcessBar(high, low, close, volume float64) {
 		e.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
-	if len(e.Suite.GetHMA().GetCloses()) < 10 {
-		return // warm‑up
+	e.recordPrice(close)
+	if !e.hasHistory(15) {
+		return
 	}
 
 	// If we already have a position, manage it first.
@@ -78,13 +84,19 @@ func (e *EventDriven) ProcessBar(high, low, close, volume float64) {
 	}
 
 	// No open position – act only when the external event flag is true.
-	if !e.eventActive {
+	if !e.eventActive || !e.armed {
 		return
 	}
 
 	// Pull signals.
-	hBull, _ := e.Suite.GetHMA().IsBullishCrossover()
-	hBear, _ := e.Suite.GetHMA().IsBearishCrossover()
+	hBull := e.bullishFallback()
+	if ok, err := e.Suite.GetHMA().IsBullishCrossover(); err == nil {
+		hBull = hBull || ok
+	}
+	hBear := e.bearishFallback()
+	if ok, err := e.Suite.GetHMA().IsBearishCrossover(); err == nil {
+		hBear = hBear || ok
+	}
 	atsoRaw, _ := e.Suite.GetATSO().Calculate()
 
 	// Volatility‑burst filter.
@@ -105,6 +117,7 @@ func (e *EventDriven) ProcessBar(high, low, close, volume float64) {
 	if cond {
 		e.barSinceEntry = 0
 		e.openPosition(side, close)
+		e.armed = false
 	}
 }
 
@@ -131,7 +144,7 @@ func (e *EventDriven) manageOpenPosition(currentPrice float64) {
 	if len(atrVals) == 0 {
 		return
 	}
-	atr := atrVals[len(atrVals)-1]
+	atr := e.sanitizeVolatility(math.Abs(atrVals[len(atrVals)-1]), currentPrice)
 	stopDist := atr * e.Cfg.StopLossPct
 	if stopDist <= 0 {
 		stopDist = 0.0001
@@ -174,6 +187,9 @@ func (e *EventDriven) manageOpenPosition(currentPrice float64) {
 
 // lastClose returns the most recent close price from the suite.
 func (e *EventDriven) lastClose() float64 {
+	if e.prices != nil && e.prices.Len() > 0 {
+		return e.prices.Last()
+	}
 	closes := e.Suite.GetRSI().GetCloses()
 	if len(closes) == 0 {
 		return 0

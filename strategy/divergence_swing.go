@@ -39,33 +39,48 @@ func (d *DivergenceSwing) ProcessBar(high, low, close, volume float64) {
 		d.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
-	if len(d.Suite.GetRSI().GetCloses()) < 14 {
-		return // warm‑up
+	d.recordPrice(close)
+	if !d.hasHistory(12) {
+		return
 	}
-
-	// Trend filter (HMA)
-	hBull, _ := d.Suite.GetHMA().IsBullishCrossover()
-	hBear, _ := d.Suite.GetHMA().IsBearishCrossover()
+	hBull := d.bullishFallback()
+	if ok, err := d.Suite.GetHMA().IsBullishCrossover(); err == nil {
+		hBull = hBull || ok
+	}
+	hBear := d.bearishFallback()
+	if ok, err := d.Suite.GetHMA().IsBearishCrossover(); err == nil {
+		hBear = hBear || ok
+	}
 
 	// Divergence checks (any oscillator may fire)
 	bullDiv, bearDiv := false, false
 
-	if ok, typ, _ := d.Suite.GetRSI().IsDivergence(); ok && typ == "Bullish" {
+	if ok, typ, err := d.Suite.GetRSI().IsDivergence(); err == nil && ok {
+		if typ == "Bullish" {
+			bullDiv = true
+		} else if typ == "Bearish" {
+			bearDiv = true
+		}
+	}
+	if dir, err := d.Suite.GetMFI().IsDivergence(); err == nil {
+		switch dir {
+		case "Bullish":
+			bullDiv = true
+		case "Bearish":
+			bearDiv = true
+		}
+	}
+	if ok, typ := d.Suite.GetAMDO().IsDivergence(); ok {
+		if typ == "Bullish" {
+			bullDiv = true
+		} else if typ == "Bearish" {
+			bearDiv = true
+		}
+	}
+	if d.bullishReversal() {
 		bullDiv = true
 	}
-	if ok, typ, _ := d.Suite.GetRSI().IsDivergence(); ok && typ == "Bearish" {
-		bearDiv = true
-	}
-	if dir, err := d.Suite.GetMFI().IsDivergence(); err == nil && dir == "Bullish" {
-		bullDiv = true
-	}
-	if dir, err := d.Suite.GetMFI().IsDivergence(); err == nil && dir == "Bearish" {
-		bearDiv = true
-	}
-	if ok, typ := d.Suite.GetAMDO().IsDivergence(); ok && typ == "Bullish" {
-		bullDiv = true
-	}
-	if ok, typ := d.Suite.GetAMDO().IsDivergence(); ok && typ == "Bearish" {
+	if d.bearishReversal() {
 		bearDiv = true
 	}
 

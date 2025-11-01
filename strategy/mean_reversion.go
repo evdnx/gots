@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"math"
+
 	"github.com/evdnx/goti"
 	"github.com/evdnx/gots/config"
 	"github.com/evdnx/gots/executor"
@@ -40,17 +42,35 @@ func (mr *MeanReversion) ProcessBar(high, low, close, volume float64) {
 		mr.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
-	if len(mr.Suite.GetRSI().GetCloses()) < 14 {
-		return // warm‑up
+	mr.recordPrice(close)
+	if !mr.hasHistory(15) {
+		return
 	}
 
-	// Pull crossovers.
-	rsiBull, _ := mr.Suite.GetRSI().IsBullishCrossover()
-	rsiBear, _ := mr.Suite.GetRSI().IsBearishCrossover()
-	mfiBull, _ := mr.Suite.GetMFI().IsBullishCrossover()
-	mfiBear, _ := mr.Suite.GetMFI().IsBearishCrossover()
-	vwaoBull, _ := mr.Suite.GetVWAO().IsBullishCrossover()
-	vwaoBear, _ := mr.Suite.GetVWAO().IsBearishCrossover()
+	rsiBull := mr.bullishFallback()
+	if ok, err := mr.Suite.GetRSI().IsBullishCrossover(); err == nil {
+		rsiBull = rsiBull || ok
+	}
+	rsiBear := mr.bearishFallback()
+	if ok, err := mr.Suite.GetRSI().IsBearishCrossover(); err == nil {
+		rsiBear = rsiBear || ok
+	}
+	mfiBull := mr.bullishFallback()
+	if ok, err := mr.Suite.GetMFI().IsBullishCrossover(); err == nil {
+		mfiBull = mfiBull || ok
+	}
+	mfiBear := mr.bearishFallback()
+	if ok, err := mr.Suite.GetMFI().IsBearishCrossover(); err == nil {
+		mfiBear = mfiBear || ok
+	}
+	vwaoBull := mr.bullishFallback()
+	if ok, err := mr.Suite.GetVWAO().IsBullishCrossover(); err == nil {
+		vwaoBull = vwaoBull || ok
+	}
+	vwaoBear := mr.bearishFallback()
+	if ok, err := mr.Suite.GetVWAO().IsBearishCrossover(); err == nil {
+		vwaoBear = vwaoBear || ok
+	}
 
 	longSignal := rsiBull && mfiBull && vwaoBull
 	shortSignal := rsiBear && mfiBear && vwaoBear
@@ -72,6 +92,10 @@ func (mr *MeanReversion) ProcessBar(high, low, close, volume float64) {
 
 	case posQty != 0 && mr.Cfg.TrailingPct > 0:
 		mr.applyTrailingStop(close)
+	case posQty != 0:
+		if mr.Cfg.TakeProfitPct > 0 {
+			mr.manageTakeProfit(close)
+		}
 	}
 }
 
@@ -105,4 +129,28 @@ func (mr *MeanReversion) openShort(price float64) {
 		Comment: "MeanReversion entry short",
 	}
 	_ = mr.submitOrder(o, "mr_short")
+}
+
+func (mr *MeanReversion) manageTakeProfit(currentPrice float64) {
+	qty, avg := mr.Exec.Position(mr.Symbol)
+	if qty == 0 {
+		return
+	}
+	atrVals := mr.Suite.GetATSO().GetATSOValues()
+	atr := 0.0
+	if len(atrVals) > 0 {
+		atr = math.Abs(atrVals[len(atrVals)-1])
+	}
+	atr = mr.sanitizeVolatility(atr, avg)
+	if qty > 0 {
+		target := avg + atr*mr.Cfg.TakeProfitPct
+		if currentPrice >= target {
+			mr.closePosition(currentPrice, "mr_tp")
+		}
+	} else {
+		target := avg - atr*mr.Cfg.TakeProfitPct
+		if currentPrice <= target {
+			mr.closePosition(currentPrice, "mr_tp")
+		}
+	}
 }

@@ -47,22 +47,42 @@ func (t *TrendComposite) ProcessBar(high, low, close, volume float64) {
 		t.Log.Warn("suite_add_error", zap.Error(err))
 		return
 	}
-	// Warm‑up: ensure we have enough data for the indicators.
-	if len(t.Suite.GetHMA().GetCloses()) < 10 {
+	t.recordPrice(close)
+	if !t.hasHistory(15) {
 		return
 	}
 
 	// Pull the three core signals.
-	hBull, _ := t.Suite.GetHMA().IsBullishCrossover()
-	hBear, _ := t.Suite.GetHMA().IsBearishCrossover()
-	aBull, _ := t.Suite.GetAMDO().IsBullishCrossover()
-	aBear, _ := t.Suite.GetAMDO().IsBearishCrossover()
-	atBull := t.Suite.GetATSO().IsBullishCrossover()
-	atBear := t.Suite.GetATSO().IsBearishCrossover()
+	hBull := t.bullishFallback()
+	if ok, err := t.Suite.GetHMA().IsBullishCrossover(); err == nil {
+		hBull = hBull || ok
+	}
+	hBear := t.bearishFallback()
+	if ok, err := t.Suite.GetHMA().IsBearishCrossover(); err == nil {
+		hBear = hBear || ok
+	}
+	aBull := t.bullishFallback()
+	if ok, err := t.Suite.GetAMDO().IsBullishCrossover(); err == nil {
+		aBull = aBull || ok
+	}
+	aBear := t.bearishFallback()
+	if ok, err := t.Suite.GetAMDO().IsBearishCrossover(); err == nil {
+		aBear = aBear || ok
+	}
+	atBull := t.bullishFallback() || t.Suite.GetATSO().IsBullishCrossover()
+	atBear := t.bearishFallback() || t.Suite.GetATSO().IsBearishCrossover()
 
 	// Raw indicator values for momentum direction.
-	admoVal, _ := t.Suite.GetAMDO().Calculate()
-	atsoVal, _ := t.Suite.GetATSO().Calculate()
+	admoVal, err := t.Suite.GetAMDO().Calculate()
+	if err != nil {
+		admoVal = t.prices.Slope()
+	}
+	atsoVal, err := t.Suite.GetATSO().Calculate()
+	if err != nil {
+		atsoVal = t.prices.Slope()
+	} else {
+		atsoVal = t.sanitizeVolatility(math.Abs(atsoVal), close) * math.Copysign(1, atsoVal)
+	}
 
 	longCond := hBull && aBull && atBull && admoVal > 0 && atsoVal > 0
 	shortCond := hBear && aBear && atBear && admoVal < 0 && atsoVal < 0
@@ -85,6 +105,13 @@ func (t *TrendComposite) ProcessBar(high, low, close, volume float64) {
 	case posQty != 0 && t.Cfg.TrailingPct > 0:
 		// Optional trailing‑stop logic.
 		t.applyTrailingStop(close)
+		if t.Cfg.TakeProfitPct > 0 {
+			t.manageTakeProfit(close)
+		}
+	case posQty != 0:
+		if t.Cfg.TakeProfitPct > 0 {
+			t.manageTakeProfit(close)
+		}
 	}
 }
 
@@ -141,4 +168,28 @@ func (t *TrendComposite) closePosition(price float64, ctx string) {
 	}
 	_ = t.submitOrder(o, ctx)
 	t.lastDir = 0
+}
+
+func (t *TrendComposite) manageTakeProfit(currentPrice float64) {
+	qty, avg := t.Exec.Position(t.Symbol)
+	if qty == 0 {
+		return
+	}
+	atrVals := t.Suite.GetATSO().GetATSOValues()
+	atr := 0.0
+	if len(atrVals) > 0 {
+		atr = math.Abs(atrVals[len(atrVals)-1])
+	}
+	atr = t.sanitizeVolatility(atr, avg)
+	if qty > 0 {
+		target := avg + atr*t.Cfg.TakeProfitPct
+		if currentPrice >= target {
+			t.closePosition(currentPrice, "trendcomp_tp")
+		}
+	} else {
+		target := avg - atr*t.Cfg.TakeProfitPct
+		if currentPrice <= target {
+			t.closePosition(currentPrice, "trendcomp_tp")
+		}
+	}
 }
