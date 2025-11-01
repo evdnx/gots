@@ -61,6 +61,11 @@ func buildConfig() config.StrategyConfig {
 	}
 }
 
+// buildStrategy creates a mock executor, a mock logger and then calls the
+// concrete strategy constructor.  The constructor builds its own
+// IndicatorSuite (using *valid* RSI/MFI thresholds), so we no longer call
+// NewBaseStrategy here – that call previously caused the “RSI overbought
+// must be greater than oversold” error.
 func buildStrategy(t *testing.T,
 	constructor func(symbol string, cfg config.StrategyConfig,
 		exec executor.Executor, log logger.Logger) interface {
@@ -73,13 +78,13 @@ func buildStrategy(t *testing.T,
 	mockExec := testutils.NewMockExecutor(10_000) // $10 k start equity
 	mockLog := testutils.NewMockLogger()
 
-	// Validate the config (this uses the relaxed Validate we added).
+	// Validate the config (uses the relaxed Validate we added).
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config validation failed: %v", err)
 	}
 
-	// Most strategy constructors accept (symbol, cfg, exec, log) – the
-	// concrete type varies, so we use a type‑assertion after construction.
+	// Construct the concrete strategy – each strategy’s own suiteFactory
+	// supplies production‑grade RSI/MFI thresholds, so this will succeed.
 	strat := constructor("TEST", cfg, mockExec, mockLog)
 	return strat, mockExec
 }
