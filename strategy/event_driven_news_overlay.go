@@ -8,7 +8,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // EventDriven implements the news‑overlay strategy.
@@ -65,7 +64,7 @@ func (e *EventDriven) SetEventActive(active bool) {
 // ProcessBar handles each incoming candle.
 func (e *EventDriven) ProcessBar(high, low, close, volume float64) {
 	if err := e.Suite.Add(high, low, close, volume); err != nil {
-		e.Log.Warn("suite_add_error", zap.Error(err))
+		e.Log.Warn("suite_add_error", logger.Err(err))
 		return
 	}
 	e.recordPrice(close)

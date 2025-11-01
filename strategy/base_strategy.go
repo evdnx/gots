@@ -10,7 +10,6 @@ import (
 	"github.com/evdnx/gots/metrics"
 	"github.com/evdnx/gots/risk"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // BaseStrategy bundles the common dependencies and helpers.
@@ -52,10 +51,21 @@ func NewBaseStrategy(symbol string, cfg config.StrategyConfig,
 func (b *BaseStrategy) submitOrder(o types.Order, ctx string) error {
 	err := b.Exec.Submit(o)
 	if err != nil {
-		b.Log.Error("order_submit_failed", zap.String("symbol", o.Symbol), zap.String("side", string(o.Side)), zap.Float64("qty", o.Qty), zap.Error(err))
+		b.Log.Error("order_submit_failed",
+			logger.String("symbol", o.Symbol),
+			logger.String("side", string(o.Side)),
+			logger.Float64("qty", o.Qty),
+			logger.Err(err),
+		)
 		return err
 	}
-	b.Log.Info("order_submitted", zap.String("symbol", o.Symbol), zap.String("side", string(o.Side)), zap.Float64("qty", o.Qty), zap.Float64("price", o.Price), zap.String("ctx", ctx))
+	b.Log.Info("order_submitted",
+		logger.String("symbol", o.Symbol),
+		logger.String("side", string(o.Side)),
+		logger.Float64("qty", o.Qty),
+		logger.Float64("price", o.Price),
+		logger.String("ctx", ctx),
+	)
 	metrics.OrdersSubmitted.WithLabelValues(ctx).Inc()
 	return nil
 }

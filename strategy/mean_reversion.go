@@ -8,7 +8,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // MeanReversion implements the classic oversold/overbought mean‑reversion strategy.
@@ -39,7 +38,7 @@ func NewMeanReversion(symbol string, cfg config.StrategyConfig,
 // ProcessBar updates the suite and evaluates the three oscillator crossovers.
 func (mr *MeanReversion) ProcessBar(high, low, close, volume float64) {
 	if err := mr.Suite.Add(high, low, close, volume); err != nil {
-		mr.Log.Warn("suite_add_error", zap.Error(err))
+		mr.Log.Warn("suite_add_error", logger.Err(err))
 		return
 	}
 	mr.recordPrice(close)

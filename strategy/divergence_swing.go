@@ -6,7 +6,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // DivergenceSwing looks for bullish/bearish divergence combined with HMA trend.
@@ -36,7 +35,7 @@ func NewDivergenceSwing(symbol string, cfg config.StrategyConfig,
 // ProcessBar updates the suite and checks for divergence signals.
 func (d *DivergenceSwing) ProcessBar(high, low, close, volume float64) {
 	if err := d.Suite.Add(high, low, close, volume); err != nil {
-		d.Log.Warn("suite_add_error", zap.Error(err))
+		d.Log.Warn("suite_add_error", logger.Err(err))
 		return
 	}
 	d.recordPrice(close)

@@ -8,7 +8,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // BreakoutMomentum implements the breakout / momentum‑burst strategy.
@@ -35,7 +34,7 @@ func NewBreakoutMomentum(symbol string, cfg config.StrategyConfig,
 // ProcessBar updates the suite, evaluates breakout signals and manages positions.
 func (bm *BreakoutMomentum) ProcessBar(high, low, close, volume float64) {
 	if err := bm.Suite.Add(high, low, close, volume); err != nil {
-		bm.Log.Warn("suite_add_error", zap.Error(err))
+		bm.Log.Warn("suite_add_error", logger.Err(err))
 		return
 	}
 	bm.recordPrice(close)

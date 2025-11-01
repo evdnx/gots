@@ -8,7 +8,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // VolScaledPos implements a volatility‑scaled position‑size strategy.
@@ -39,7 +38,7 @@ func NewVolScaledPos(symbol string, cfg config.StrategyConfig,
 // volatility‑scaled quantity and manages the position.
 func (v *VolScaledPos) ProcessBar(high, low, close, volume float64) {
 	if err := v.Suite.Add(high, low, close, volume); err != nil {
-		v.Log.Warn("suite_add_error", zap.Error(err))
+		v.Log.Warn("suite_add_error", logger.Err(err))
 		return
 	}
 	v.recordPrice(close)

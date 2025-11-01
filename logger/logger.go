@@ -1,51 +1,54 @@
 package logger
 
 import (
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"github.com/evdnx/golog"
 )
 
-// Logger is a thin wrapper around zap.SugaredLogger that provides the
-// three log levels we need throughout the codebase.
+// Field re-exports golog.Field so callers do not depend on the concrete logger.
+type Field = golog.Field
+
+// Logger defines the minimal logging surface used across the codebase.
 type Logger interface {
-	Info(msg string, fields ...zap.Field)
-	Warn(msg string, fields ...zap.Field)
-	Error(msg string, fields ...zap.Field)
+	Info(msg string, fields ...Field)
+	Warn(msg string, fields ...Field)
+	Error(msg string, fields ...Field)
 }
 
-// zapLogger implements Logger using a SugaredLogger internally.
-type zapLogger struct {
-	sugar *zap.SugaredLogger
+// gologLogger adapts golog.Logger to the local Logger interface.
+type gologLogger struct {
+	inner *golog.Logger
 }
 
-func (l *zapLogger) Info(msg string, fields ...zap.Field) {
-	l.sugar.Infow(msg, zapFieldsToMap(fields)...)
-}
-func (l *zapLogger) Warn(msg string, fields ...zap.Field) {
-	l.sugar.Warnw(msg, zapFieldsToMap(fields)...)
-}
-func (l *zapLogger) Error(msg string, fields ...zap.Field) {
-	l.sugar.Errorw(msg, zapFieldsToMap(fields)...)
+func (l *gologLogger) Info(msg string, fields ...Field) {
+	l.inner.Info(msg, fields...)
 }
 
-// NewZapLogger creates a production‑ready logger (JSON encoding, level INFO).
+func (l *gologLogger) Warn(msg string, fields ...Field) {
+	l.inner.Warn(msg, fields...)
+}
+
+func (l *gologLogger) Error(msg string, fields ...Field) {
+	l.inner.Error(msg, fields...)
+}
+
+// NewZapLogger creates a production‑ready logger wired to golog with JSON output.
 func NewZapLogger() (Logger, error) {
-	cfg := zap.NewProductionConfig()
-	cfg.Encoding = "json"
-	cfg.EncoderConfig.TimeKey = "ts"
-	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	z, err := cfg.Build()
+	l, err := golog.NewLogger(
+		golog.WithStdOutProvider(golog.JSONEncoder),
+		golog.WithLevel(golog.InfoLevel),
+	)
 	if err != nil {
 		return nil, err
 	}
-	return &zapLogger{sugar: z.Sugar()}, nil
+	return &gologLogger{inner: l}, nil
 }
 
-// Helper – converts zap.Field slice to a map for SugaredLogger.
-func zapFieldsToMap(fields []zap.Field) []interface{} {
-	out := make([]interface{}, 0, len(fields)*2)
-	for _, f := range fields {
-		out = append(out, f.Key, f.Interface)
-	}
-	return out
-}
+// Structured field helpers re-exported for convenience.
+var (
+	String   = golog.String
+	Int      = golog.Int
+	Float64  = golog.Float64
+	Any      = golog.Any
+	Err      = golog.Err
+	Duration = golog.Duration
+)

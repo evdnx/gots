@@ -8,7 +8,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // MultiTF confirms a signal on two time‑frames (fast & slow).
@@ -57,15 +56,15 @@ func NewMultiTF(symbol string, cfg config.StrategyConfig,
 // (it internally trims to its longer window).
 func (m *MultiTF) ProcessBar(high, low, close, volume float64) {
 	if err := m.Suite.Add(high, low, close, volume); err != nil {
-		m.Log.Warn("base_suite_add_error", zap.Error(err))
+		m.Log.Warn("base_suite_add_error", logger.Err(err))
 	}
 	// Fast suite always receives the bar.
 	if err := m.fastSuite.Add(high, low, close, volume); err != nil {
-		m.Log.Warn("fast_suite_add_error", zap.Error(err))
+		m.Log.Warn("fast_suite_add_error", logger.Err(err))
 	}
 	// Slow suite receives the same bar (it will ignore excess data internally).
 	if err := m.slowSuite.Add(high, low, close, volume); err != nil {
-		m.Log.Warn("slow_suite_add_error", zap.Error(err))
+		m.Log.Warn("slow_suite_add_error", logger.Err(err))
 	}
 	m.recordPrice(close)
 	if !m.hasHistory(15) {

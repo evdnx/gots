@@ -8,7 +8,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // TrendComposite combines HMA, ADMO, and ATSO crossovers with raw‑value filters.
@@ -44,7 +43,7 @@ func NewTrendComposite(symbol string, cfg config.StrategyConfig,
 // ProcessBar evaluates the composite signal and manages the position.
 func (t *TrendComposite) ProcessBar(high, low, close, volume float64) {
 	if err := t.Suite.Add(high, low, close, volume); err != nil {
-		t.Log.Warn("suite_add_error", zap.Error(err))
+		t.Log.Warn("suite_add_error", logger.Err(err))
 		return
 	}
 	t.recordPrice(close)

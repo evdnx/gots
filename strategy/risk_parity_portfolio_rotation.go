@@ -12,7 +12,6 @@ import (
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/risk"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // SymbolState holds the per‑symbol suite and the most recent strength score.
@@ -92,7 +91,10 @@ func (rp *RiskParityRotation) ProcessBar(symbol string, high, low, close, volume
 	}
 	if err := state.suite.Add(high, low, close, volume); err != nil {
 		rp.mu.Unlock()
-		rp.log.Warn("rp_suite_add_error", zap.String("symbol", symbol), zap.Error(err))
+		rp.log.Warn("rp_suite_add_error",
+			logger.String("symbol", symbol),
+			logger.Err(err),
+		)
 		return
 	}
 	if state.hasLast {
@@ -271,7 +273,9 @@ func (rp *RiskParityRotation) rebalance() {
 		}
 		if err := rp.exec.Submit(o); err != nil {
 			rp.log.Error("risk_parity_submit_error",
-				zap.String("symbol", sym), zap.Error(err))
+				logger.String("symbol", sym),
+				logger.Err(err),
+			)
 		}
 	}
 }
@@ -295,7 +299,9 @@ func (rp *RiskParityRotation) closePosition(symbol string, price float64) {
 	}
 	if err := rp.exec.Submit(o); err != nil {
 		rp.log.Error("risk_parity_close_error",
-			zap.String("symbol", symbol), zap.Error(err))
+			logger.String("symbol", symbol),
+			logger.Err(err),
+		)
 	}
 }
 
@@ -321,6 +327,6 @@ func clamp(v, minVal, maxVal float64) float64 {
 
 // Helper to create a consistent error when logger is needed.
 func logOutputError(l logger.Logger, msg string) error {
-	l.Error("configuration_error", zap.String("msg", msg))
+	l.Error("configuration_error", logger.String("msg", msg))
 	return fmt.Errorf("%s", msg)
 }

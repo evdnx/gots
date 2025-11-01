@@ -8,7 +8,6 @@ import (
 	"github.com/evdnx/gots/executor"
 	"github.com/evdnx/gots/logger"
 	"github.com/evdnx/gots/types"
-	"go.uber.org/zap"
 )
 
 // AdaptiveBandMR implements the ATR‑adaptive band mean‑reversion strategy.
@@ -41,7 +40,7 @@ func NewAdaptiveBandMR(symbol string, cfg config.StrategyConfig,
 func (a *AdaptiveBandMR) ProcessBar(high, low, close, volume float64) {
 	// Warm‑up: ensure we have enough data for the indicators.
 	if err := a.Suite.Add(high, low, close, volume); err != nil {
-		a.Log.Warn("suite_add_error", zap.Error(err))
+		a.Log.Warn("suite_add_error", logger.Err(err))
 		return
 	}
 	a.recordPrice(close)
